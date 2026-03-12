@@ -6,7 +6,6 @@ and process button.
 """
 
 import os
-import subprocess
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
@@ -369,8 +368,15 @@ class MappingPanel(QWidget):
         self.process_btn.setEnabled(True)
 
     def _open_output_folder(self):
-        if hasattr(self, "_output_path"):
-            os.startfile(self._output_path)
+        if hasattr(self, "_output_path") and self._output_path:
+            path = os.path.realpath(self._output_path)
+            if os.path.isdir(path):
+                os.startfile(path)
+            else:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"Output path is not a valid directory: {path}"
+                )
 
     def clear(self):
         self._release = None

@@ -4,6 +4,7 @@ VinylFlow - Main Window
 QMainWindow orchestrating all panels and workers.
 """
 
+import logging
 import os
 import shutil
 import sys
@@ -98,10 +99,8 @@ class MainWindow(QMainWindow):
             self.move(state["x"], state["y"])
 
         # Load custom font
-        fonts_dir = Path(__file__).parent.parent / "backend" / "static" / "fonts"
+        fonts_dir = Path(__file__).parent.parent / "assets" / "fonts"
         if fonts_dir.exists():
-            for font_file in fonts_dir.glob("*.woff2"):
-                QFontDatabase.addApplicationFont(str(font_file))
             for font_file in fonts_dir.glob("*.ttf"):
                 QFontDatabase.addApplicationFont(str(font_file))
 
@@ -581,7 +580,13 @@ class MainWindow(QMainWindow):
 
     def _open_update_url(self):
         if hasattr(self, "_update_url") and self._update_url:
-            os.startfile(self._update_url)
+            url = self._update_url
+            if url.startswith("https://github.com/"):
+                os.startfile(url)
+            else:
+                logging.getLogger(__name__).warning(
+                    f"Blocked non-GitHub update URL: {url}"
+                )
 
     # ----- Cleanup timer -----
 
