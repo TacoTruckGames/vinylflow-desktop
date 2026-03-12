@@ -22,7 +22,7 @@ class PreviewWorker(QThread):
                  output_path: str):
         super().__init__()
         self.source_path = source_path
-        self.start = start
+        self.start_time = start
         self.duration = min(30.0, duration)  # max 30s preview
         self.output_path = output_path
 
@@ -32,7 +32,7 @@ class PreviewWorker(QThread):
                 _ffmpeg(),
                 "-y",
                 "-i", self.source_path,
-                "-ss", str(self.start),
+                "-ss", str(self.start_time),
                 "-t", str(self.duration),
                 "-acodec", "libmp3lame",
                 "-b:a", "128k",

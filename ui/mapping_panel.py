@@ -108,7 +108,7 @@ class MappingPanel(QWidget):
 
         # Reverse button
         self.reverse_btn = QPushButton("Reverse Mapping")
-        self.reverse_btn.setFixedWidth(130)
+        self.reverse_btn.setFixedWidth(160)
         self.reverse_btn.clicked.connect(self._reverse_mapping)
         opts.addWidget(self.reverse_btn)
 
@@ -122,12 +122,13 @@ class MappingPanel(QWidget):
             0, QHeaderView.ResizeMode.ResizeToContents
         )
         self.mapping_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.ResizeToContents
+            1, QHeaderView.ResizeMode.Stretch
         )
         self.mapping_table.horizontalHeader().setSectionResizeMode(
             2, QHeaderView.ResizeMode.Stretch
         )
         self.mapping_table.verticalHeader().setVisible(False)
+        self.mapping_table.verticalHeader().setDefaultSectionSize(42)
         self.mapping_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         layout.addWidget(self.mapping_table, stretch=1)
 
