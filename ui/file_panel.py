@@ -294,6 +294,17 @@ class FilePanel(QWidget):
             _, item_widget = self._items[file_id]
             item_widget.set_status(status)
 
+    def get_analyzable_file_ids(self) -> list[str]:
+        """Return file IDs with status 'uploaded' (ready to analyze)."""
+        return [
+            fid for fid, info in self._files.items()
+            if info.get("status") in ("uploaded",)
+        ]
+
+    def get_all_files(self) -> dict:
+        """Return all file info dicts keyed by file_id."""
+        return dict(self._files)
+
     def add_external_files(self, file_paths: list):
         """Add files from command-line args or second instance."""
         self._on_files_dropped(file_paths)

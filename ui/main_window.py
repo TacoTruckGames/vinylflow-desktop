@@ -67,6 +67,8 @@ class MainWindow(QMainWindow):
         self._detected_tracks = []
         self._selected_release = None
         self._cover_cache = {}  # release_id -> bytes
+        self._analyze_results = {}  # file_id -> list of Track objects
+        self._analyze_queue = []
         self._workers = []  # keep references to prevent GC
 
         self._setup_window()
@@ -229,6 +231,7 @@ class MainWindow(QMainWindow):
         # File panel
         self.file_panel.file_selected.connect(self._on_file_selected)
         self.file_panel.file_removed.connect(self._on_file_removed)
+        self.file_panel.files_registered.connect(self._on_files_registered)
 
         # Waveform
         self.waveform.regions_changed.connect(self._on_regions_changed)
@@ -256,13 +259,19 @@ class MainWindow(QMainWindow):
 
         self._current_file_id = file_id
         self._current_file_info = info
-        self._detected_tracks = []
         self._selected_release = None
 
         self.analyze_btn.setEnabled(True)
         self.tracks_panel.clear()
         self.mapping_panel.clear()
         self.waveform.clear()
+
+        # Restore cached analysis results if this file was already analyzed
+        cached = getattr(self, "_analyze_results", {}).get(file_id)
+        if cached:
+            self._detected_tracks = cached
+        else:
+            self._detected_tracks = []
 
         # Auto-suggest search from filename
         filename_stem = Path(info["filename"]).stem
@@ -280,6 +289,11 @@ class MainWindow(QMainWindow):
             self.waveform.clear()
             self.tracks_panel.clear()
             self.mapping_panel.clear()
+
+    def _on_files_registered(self, files: list):
+        """Enable Analyze button when files are added."""
+        if files:
+            self.analyze_btn.setEnabled(True)
 
     def _on_external_files(self, file_paths: list):
         self.file_panel.add_external_files(file_paths)
@@ -303,38 +317,72 @@ class MainWindow(QMainWindow):
     # ----- Analysis -----
 
     def _on_analyze(self):
-        if not self._current_file_info:
+        # Collect all files ready to analyze
+        analyzable = self.file_panel.get_analyzable_file_ids()
+        if not analyzable:
             return
 
+        self._analyze_queue = list(analyzable)
+        self._analyze_results = {}  # file_id -> tracks
         self.analyze_btn.setEnabled(False)
         self.analyze_btn.setText("Analyzing...")
-        self.file_panel.set_file_status(self._current_file_id, "Analyzing")
+
+        # Mark all as Analyzing
+        for fid in self._analyze_queue:
+            self.file_panel.set_file_status(fid, "Analyzing")
+
+        self._analyze_next()
+
+    def _analyze_next(self):
+        if not self._analyze_queue:
+            # All done
+            self.analyze_btn.setEnabled(True)
+            self.analyze_btn.setText("Analyze")
+            return
+
+        file_id = self._analyze_queue[0]
+        info = self.file_panel.get_file_info(file_id)
+        if not info:
+            self._analyze_queue.pop(0)
+            self._analyze_next()
+            return
 
         worker = AnalyzeWorker(
-            self._current_file_info["path"],
+            info["path"],
             self.config.default_silence_threshold,
             self.config.default_min_silence_duration,
             self.config.default_min_track_length,
         )
-        worker.finished.connect(self._on_analysis_complete)
-        worker.error.connect(self._on_analysis_error)
+        worker.finished.connect(lambda tracks, fid=file_id: self._on_analysis_complete(fid, tracks))
+        worker.error.connect(lambda err, fid=file_id: self._on_analysis_error(fid, err))
         self._start_worker(worker)
 
-    def _on_analysis_complete(self, tracks: list):
-        self._detected_tracks = tracks
-        self.analyze_btn.setEnabled(True)
-        self.analyze_btn.setText("Re-Analyze")
-        self.file_panel.set_file_status(self._current_file_id, "Analyzed")
+    def _on_analysis_complete(self, file_id: str, tracks: list):
+        self._analyze_results[file_id] = tracks
+        self.file_panel.set_file_status(file_id, "Analyzed")
 
-        self.waveform.set_track_regions(tracks)
-        self.tracks_panel.set_tracks(tracks)
-        self.mapping_panel.set_detected_tracks(tracks)
+        # Update UI if this is the currently selected file
+        if file_id == self._current_file_id:
+            self._detected_tracks = tracks
+            self.waveform.set_track_regions(tracks)
+            self.tracks_panel.set_tracks(tracks)
+            self.mapping_panel.set_detected_tracks(tracks)
 
-    def _on_analysis_error(self, error: str):
-        self.analyze_btn.setEnabled(True)
-        self.analyze_btn.setText("Analyze")
-        self.file_panel.set_file_status(self._current_file_id, "Error")
-        QMessageBox.warning(self, "Analysis Failed", f"Silence detection failed:\n{error}")
+        # Continue to next file
+        if self._analyze_queue and self._analyze_queue[0] == file_id:
+            self._analyze_queue.pop(0)
+        self._analyze_next()
+
+    def _on_analysis_error(self, file_id: str, error: str):
+        self.file_panel.set_file_status(file_id, "Error")
+
+        # Continue to next file
+        if self._analyze_queue and self._analyze_queue[0] == file_id:
+            self._analyze_queue.pop(0)
+        self._analyze_next()
+
+        if file_id == self._current_file_id:
+            QMessageBox.warning(self, "Analysis Failed", f"Silence detection failed:\n{error}")
 
     # ----- Waveform editing -----
 
