@@ -116,8 +116,8 @@ class MappingPanel(QWidget):
 
         # Mapping table
         self.mapping_table = QTableWidget()
-        self.mapping_table.setColumnCount(3)
-        self.mapping_table.setHorizontalHeaderLabels(["Track", "Discogs Position", "Title"])
+        self.mapping_table.setColumnCount(4)
+        self.mapping_table.setHorizontalHeaderLabels(["Track", "Discogs Position", "Title", "Length"])
         self.mapping_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.ResizeToContents
         )
@@ -126,6 +126,9 @@ class MappingPanel(QWidget):
         )
         self.mapping_table.horizontalHeader().setSectionResizeMode(
             2, QHeaderView.ResizeMode.Stretch
+        )
+        self.mapping_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents
         )
         self.mapping_table.verticalHeader().setVisible(False)
         self.mapping_table.verticalHeader().setDefaultSectionSize(42)
@@ -272,6 +275,17 @@ class MappingPanel(QWidget):
             title_item.setFlags(title_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.mapping_table.setItem(i, 2, title_item)
 
+            # Duration from Discogs
+            if i < num_discogs:
+                dt = self._release.tracks[i]
+                dur_str = getattr(dt, "duration_str", "") or "N/A"
+            else:
+                dur_str = "N/A"
+            dur_item = QTableWidgetItem(dur_str)
+            dur_item.setFlags(dur_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            dur_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.mapping_table.setItem(i, 3, dur_item)
+
             combo.currentIndexChanged.connect(
                 lambda idx, row=i: self._on_combo_changed(row, idx)
             )
@@ -290,6 +304,11 @@ class MappingPanel(QWidget):
         if self._release and combo_idx < len(self._release.tracks):
             dt = self._release.tracks[combo_idx]
             self.mapping_table.setItem(row, 2, QTableWidgetItem(dt.title))
+            dur_str = getattr(dt, "duration_str", "") or "N/A"
+            dur_item = QTableWidgetItem(dur_str)
+            dur_item.setFlags(dur_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            dur_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.mapping_table.setItem(row, 3, dur_item)
 
     def _reverse_mapping(self):
         """Reverse the mapping order."""
