@@ -12,10 +12,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QFontDatabase, QFont, QCloseEvent
+from PySide6.QtGui import QAction, QIcon, QFontDatabase, QFont, QCloseEvent
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QLabel, QPushButton, QFrame, QApplication, QMessageBox,
+    QLabel, QPushButton, QFrame, QApplication, QMessageBox, QMenuBar,
 )
 
 from config import Config
@@ -106,6 +106,9 @@ class MainWindow(QMainWindow):
                 QFontDatabase.addApplicationFont(str(font_file))
 
     def _build_ui(self):
+        # Menu bar
+        self._build_menu_bar()
+
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
@@ -624,23 +627,42 @@ class MainWindow(QMainWindow):
         except ValueError:
             pass
 
+    # ----- Menu bar -----
+
+    def _build_menu_bar(self):
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("&File")
+
+        minimize_action = QAction("&Minimize to Tray", self)
+        minimize_action.triggered.connect(self._minimize_to_tray)
+        file_menu.addAction(minimize_action)
+
+        file_menu.addSeparator()
+
+        exit_action = QAction("E&xit", self)
+        exit_action.triggered.connect(self.force_quit)
+        file_menu.addAction(exit_action)
+
+    def _minimize_to_tray(self):
+        self.hide()
+        self.tray.notify("VinylFlow", "VinylFlow is still running in the system tray.")
+
     # ----- Window events -----
 
     def closeEvent(self, event: QCloseEvent):
-        # Save window state
+        # Save window state and minimize to tray
         geo = self.geometry()
         self.config.save_window_state(geo.x(), geo.y(), geo.width(), geo.height())
 
-        # Hide to tray instead of closing
         if self.tray.isVisible():
             event.ignore()
-            self.hide()
-            self.tray.notify("VinylFlow", "VinylFlow is still running in the system tray.")
+            self._minimize_to_tray()
         else:
             event.accept()
 
     def force_quit(self):
-        """Actually quit the application (from tray menu)."""
+        """Save state and truly exit the application."""
         geo = self.geometry()
         self.config.save_window_state(geo.x(), geo.y(), geo.width(), geo.height())
+        self.tray.hide()
         QApplication.instance().quit()
