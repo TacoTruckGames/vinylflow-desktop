@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# VinylFlow PyInstaller spec — Windows only
+# VinylFlow PyInstaller spec — Windows only (PySide6 native UI)
 
 import shutil
 from pathlib import Path
@@ -15,29 +15,37 @@ if not FFMPEG_PATH:
 # certifi CA bundle — needed so requests/discogs_client can verify HTTPS certs.
 certifi_datas = collect_data_files('certifi')
 
-# pythonnet — edgechromium (WebView2) backend needs clr / pythonnet at runtime.
-try:
-    pythonnet_datas = collect_data_files('pythonnet')
-except Exception:
-    pythonnet_datas = []
-
 DATA_FILES = [
-    ('backend/static', 'backend/static'),
     ('assets/VinylFlow.ico', 'assets'),
     *certifi_datas,
-    *pythonnet_datas,
 ]
 
+# PySide6 plugins and Qt modules needed at runtime
 HIDDEN_IMPORTS = [
-    'backend.api',
-    'webview',
-    'webview.platforms.edgechromium',
-    'clr',
-    'clr_loader',
+    'PySide6.QtCore',
+    'PySide6.QtGui',
+    'PySide6.QtWidgets',
+    'PySide6.QtNetwork',
+    'PySide6.QtMultimedia',
+]
+
+# Exclude unused Qt modules to reduce bundle size
+EXCLUDES = [
+    'PySide6.QtWebEngine',
+    'PySide6.QtWebEngineCore',
+    'PySide6.QtWebEngineWidgets',
+    'PySide6.Qt3DCore',
+    'PySide6.Qt3DRender',
+    'PySide6.QtQuick',
+    'PySide6.QtQml',
+    'PySide6.QtBluetooth',
+    'PySide6.QtPositioning',
+    'PySide6.QtSensors',
+    'PySide6.QtSerialPort',
 ]
 
 a = Analysis(
-    ['desktop_launcher.py'],
+    ['main.py'],
     pathex=[],
     binaries=[(FFMPEG_PATH, 'ffmpeg_bin')],
     datas=DATA_FILES,
@@ -45,7 +53,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['rthooks/rthook_vinylflow.py'],
-    excludes=[],
+    excludes=EXCLUDES,
     noarchive=False,
     optimize=0,
 )
@@ -76,8 +84,7 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
-    # UPX can corrupt .NET assemblies and third-party executables.
-    # ffmpeg.exe in particular can be mis-flagged by AV when UPX-packed.
-    upx_exclude=['Python.Runtime.dll', 'ffmpeg.exe'],
+    # ffmpeg.exe can be mis-flagged by AV when UPX-packed.
+    upx_exclude=['ffmpeg.exe'],
     name='VinylFlow',
 )

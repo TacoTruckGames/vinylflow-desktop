@@ -1,16 +1,22 @@
 # VinylFlow - Python Dependencies
 # Install with: pip install -r requirements.txt
 
+# GUI framework
+PySide6>=6.6.0
+
+# Audio processing & tagging
 mutagen>=1.47.0
-discogs-client>=2.3.0
-python-dotenv>=1.0.0
-requests>=2.31.0
-pillow>=10.0.0
 numpy>=1.24.0
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-python-multipart>=0.0.6
-websockets>=12.0
-aiofiles>=23.2.1
-pywebview>=5.1
-pystray>=0.19.0
+
+# Discogs API
+discogs-client>=2.3.0
+requests>=2.31.0
+
+# Image processing (cover art)
+pillow>=10.0.0
+
+# Configuration
+python-dotenv>=1.0.0
+
+# SSL certificates (for bundled builds)
+certifi

@@ -1,5 +1,6 @@
 ; VinylFlow Inno Setup Script
 ; Builds VinylFlow-Setup-{version}.exe installer for Windows
+; PySide6 native UI — no WebView2 dependency
 
 #define MyAppName "VinylFlow"
 #define MyAppVersion "1.0.0"
@@ -66,43 +67,3 @@ Root: HKCU; Subkey: "Software\Classes\.flac\shell\VinylFlow\command"; ValueType:
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
-
-[Code]
-// Check if WebView2 Runtime is installed; if not, download and install silently
-function IsWebView2Installed: Boolean;
-var
-  RegValue: String;
-begin
-  Result := RegQueryStringValue(HKLM, 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', RegValue)
-    or RegQueryStringValue(HKLM, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', RegValue)
-    or RegQueryStringValue(HKCU, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', RegValue);
-end;
-
-procedure InstallWebView2;
-var
-  ResultCode: Integer;
-  BootstrapperPath: String;
-begin
-  BootstrapperPath := ExpandConstant('{tmp}\MicrosoftEdgeWebview2Setup.exe');
-  // Download the Evergreen Bootstrapper
-  if not DownloadTemporaryFile('https://go.microsoft.com/fwlink/p/?LinkId=2124703', 'MicrosoftEdgeWebview2Setup.exe', '', nil) then
-  begin
-    MsgBox('Failed to download WebView2 Runtime. Please install it manually from https://developer.microsoft.com/microsoft-edge/webview2/', mbError, MB_OK);
-    Exit;
-  end;
-
-  // Run silently
-  Exec(BootstrapperPath, '/silent /install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  if CurStep = ssPostInstall then
-  begin
-    if not IsWebView2Installed then
-    begin
-      Log('WebView2 Runtime not found — installing...');
-      InstallWebView2;
-    end;
-  end;
-end;
