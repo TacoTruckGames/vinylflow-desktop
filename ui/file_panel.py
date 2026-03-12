@@ -114,9 +114,10 @@ class FileQueueItem(QWidget):
         super().__init__(parent)
         self.file_id = file_id
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumHeight(52)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setContentsMargins(8, 6, 8, 6)
 
         # File info
         info_layout = QVBoxLayout()
@@ -124,6 +125,7 @@ class FileQueueItem(QWidget):
 
         name_label = QLabel(filename)
         name_label.setStyleSheet(f"font-weight: bold; color: {TEXT_PRIMARY}; font-size: 12px;")
+        name_label.setWordWrap(True)
         info_layout.addWidget(name_label)
 
         size_mb = size / (1024 * 1024)
@@ -261,7 +263,9 @@ class FilePanel(QWidget):
         item_widget.select_clicked.connect(self._on_select)
 
         list_item = QListWidgetItem()
-        list_item.setSizeHint(item_widget.sizeHint())
+        hint = item_widget.sizeHint()
+        hint.setHeight(max(hint.height(), 56))
+        list_item.setSizeHint(hint)
         self.queue_list.addItem(list_item)
         self.queue_list.setItemWidget(list_item, item_widget)
         self._items[info["id"]] = (list_item, item_widget)
