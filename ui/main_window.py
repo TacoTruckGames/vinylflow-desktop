@@ -314,7 +314,8 @@ class MainWindow(QMainWindow):
         self._start_worker(worker)
 
     def _on_waveform_loaded(self, peaks: list, duration: float):
-        self.waveform.load_peaks(peaks, duration)
+        source_path = self._current_file_info["path"] if self._current_file_info else None
+        self.waveform.load_peaks(peaks, duration, source_path)
         if self._detected_tracks:
             self.waveform.set_track_regions(self._detected_tracks)
 
@@ -417,18 +418,7 @@ class MainWindow(QMainWindow):
         if not track:
             return
 
-        upload_dir = Path(self._current_file_info["path"]).parent
-        preview_path = str(upload_dir / f"preview_{track_number}.mp3")
-
-        worker = PreviewWorker(
-            self._current_file_info["path"],
-            track.start,
-            track.duration,
-            preview_path,
-        )
-        worker.finished.connect(lambda path: self.waveform.play_preview(path))
-        worker.error.connect(lambda e: print(f"Preview error: {e}"))
-        self._start_worker(worker)
+        self.waveform.play_from_time(track.start)
 
     # ----- Discogs search -----
 

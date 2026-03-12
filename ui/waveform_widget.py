@@ -5,14 +5,14 @@ QGraphicsView-based waveform display with draggable track regions.
 Replaces WaveSurfer.js functionality.
 """
 
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QUrl
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QUrl, QTimer
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QBrush, QCursor, QFont, QIcon, QPixmap,
 )
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGraphicsView, QGraphicsScene,
     QGraphicsItem, QGraphicsRectItem, QGraphicsLineItem,
-    QPushButton, QLabel, QMenu, QSlider,
+    QPushButton, QLabel, QMenu, QSlider, QApplication,
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
@@ -24,6 +24,48 @@ from ui.styles import (
 
 WAVEFORM_HEIGHT = 200
 HANDLE_WIDTH = 6
+
+
+def _make_play_icon(size: int = 20) -> QIcon:
+    """Draw a solid play triangle."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pixmap)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QBrush(QColor(TEXT_SECONDARY)))
+    p.setPen(QPen(Qt.PenStyle.NoPen))
+    p.drawPolygon([QPointF(4, 2), QPointF(4, size - 2), QPointF(size - 2, size / 2)])
+    p.end()
+    return QIcon(pixmap)
+
+
+def _make_pause_icon(size: int = 20) -> QIcon:
+    """Draw two vertical bars for pause."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pixmap)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QBrush(QColor(TEXT_SECONDARY)))
+    p.setPen(QPen(Qt.PenStyle.NoPen))
+    bar_w = 4
+    p.drawRect(4, 3, bar_w, size - 6)
+    p.drawRect(size - 4 - bar_w, 3, bar_w, size - 6)
+    p.end()
+    return QIcon(pixmap)
+
+
+def _make_stop_icon(size: int = 20) -> QIcon:
+    """Draw a solid square for stop."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pixmap)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QBrush(QColor(TEXT_SECONDARY)))
+    p.setPen(QPen(Qt.PenStyle.NoPen))
+    margin = 4
+    p.drawRect(margin, margin, size - margin * 2, size - margin * 2)
+    p.end()
+    return QIcon(pixmap)
 
 
 def _make_zoom_icon(sign: str, size: int = 20) -> QIcon:
@@ -231,6 +273,10 @@ class WaveformWidget(QWidget):
         self._player = None
         self._audio_output = None
         self._current_zoom = 1.0
+        self._source_path = None
+        self._cursor_timer = QTimer(self)
+        self._cursor_timer.setInterval(30)  # ~33fps
+        self._cursor_timer.timeout.connect(self._update_cursor_position)
         self._build_ui()
 
     def _build_ui(self):
@@ -262,6 +308,32 @@ class WaveformWidget(QWidget):
         self.zoom_in_btn.clicked.connect(self._zoom_in)
         controls.addWidget(self.zoom_in_btn)
 
+        controls.addSpacing(16)
+
+        # Playback controls
+        self.play_btn = QPushButton()
+        self.play_btn.setIcon(_make_play_icon())
+        self.play_btn.setFixedSize(28, 28)
+        self.play_btn.setToolTip("Play")
+        self.play_btn.clicked.connect(self._on_play)
+        controls.addWidget(self.play_btn)
+
+        self.pause_btn = QPushButton()
+        self.pause_btn.setIcon(_make_pause_icon())
+        self.pause_btn.setFixedSize(28, 28)
+        self.pause_btn.setToolTip("Pause")
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.clicked.connect(self._on_pause)
+        controls.addWidget(self.pause_btn)
+
+        self.stop_btn = QPushButton()
+        self.stop_btn.setIcon(_make_stop_icon())
+        self.stop_btn.setFixedSize(28, 28)
+        self.stop_btn.setToolTip("Stop")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self._on_stop)
+        controls.addWidget(self.stop_btn)
+
         controls.addStretch()
 
         self.time_label = QLabel("")
@@ -286,7 +358,13 @@ class WaveformWidget(QWidget):
         self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self._on_view_context_menu)
 
+        # Click-to-seek: intercept mouse events on the view
+        self.view.viewport().installEventFilter(self)
+
         layout.addWidget(self.view)
+
+        # Accept keyboard focus for spacebar
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         # Time axis
         self._time_axis = QLabel("")
@@ -294,10 +372,12 @@ class WaveformWidget(QWidget):
         self._time_axis.setFixedHeight(16)
         layout.addWidget(self._time_axis)
 
-    def load_peaks(self, peaks: list, duration: float):
+    def load_peaks(self, peaks: list, duration: float, source_path: str = None):
         """Load waveform peaks and display."""
+        self._stop_playback()
         self._peaks = peaks
         self._duration = duration
+        self._source_path = source_path
         self._current_zoom = 1.0
 
         self.scene.clear()
@@ -316,6 +396,7 @@ class WaveformWidget(QWidget):
         secs = int(duration % 60)
         self.time_label.setText(f"{mins}:{secs:02d}")
         self.zoom_label.setText("1x")
+        self._set_playback_buttons("stopped")
 
     def set_track_regions(self, tracks: list):
         """Set track regions from a list of Track objects.
@@ -523,28 +604,126 @@ class WaveformWidget(QWidget):
         level = int(self._current_zoom) if self._current_zoom >= 1 else self._current_zoom
         self.zoom_label.setText(f"{level}x")
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Space:
+            self._toggle_play_pause()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+    def _toggle_play_pause(self):
+        if not self._source_path or not self._peaks:
+            return
+        if self._player and self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._on_pause()
+        elif self._player and self._player.playbackState() == QMediaPlayer.PlaybackState.PausedState:
+            self._player.play()
+            self._set_playback_buttons("playing")
+        else:
+            self._on_play()
+
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+        if obj is self.view.viewport() and event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                # Check if the click is on a region handle — if so, let it through
+                scene_pos = self.view.mapToScene(event.pos())
+                item = self.scene.itemAt(scene_pos, self.view.transform())
+                if not isinstance(item, RegionHandle):
+                    self._seek_to_scene_pos(scene_pos)
+                    self.setFocus()
+                    return True
+        return super().eventFilter(obj, event)
+
+    def _seek_to_scene_pos(self, scene_pos):
+        if not self._peaks or self._duration <= 0 or not self._source_path:
+            return
+        px_per_sec = len(self._peaks) / self._duration
+        time_sec = max(0.0, min(scene_pos.x() / px_per_sec, self._duration))
+        self.play_from_time(time_sec)
+
+    def play_from_time(self, time_sec: float):
+        """Play the source audio from the given time position."""
+        if not self._source_path or not self._peaks:
+            return
+
+        was_playing = (self._player and
+                       self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
+
+        if not self._player:
+            self._init_player()
+            self._player.setSource(QUrl.fromLocalFile(self._source_path))
+
+        self._player.setPosition(int(time_sec * 1000))
+
+        if not was_playing:
+            # Need to play first, then seek (QMediaPlayer needs to be playing to seek on some backends)
+            self._player.play()
+            # Use a single-shot timer to seek after playback starts
+            QTimer.singleShot(50, lambda: self._player.setPosition(int(time_sec * 1000)) if self._player else None)
+        self._set_playback_buttons("playing")
+
+        # Immediately update cursor position
+        if self._cursor:
+            px_per_sec = len(self._peaks) / self._duration
+            self._cursor.setPos(time_sec * px_per_sec, 0)
+            self._cursor.show()
+
     def clear(self):
         """Clear all waveform data."""
+        self._stop_playback()
         self.scene.clear()
         self._regions = []
         self._waveform_item = None
         self._cursor = None
         self._peaks = []
         self._duration = 0
+        self._source_path = None
         self.time_label.setText("")
-        self._stop_playback()
+        self._set_playback_buttons("stopped")
 
     def play_preview(self, mp3_path: str):
         """Play an MP3 preview file."""
         self._stop_playback()
+        self._init_player()
+        self._player.setSource(QUrl.fromLocalFile(mp3_path))
+        self._player.play()
+        self._set_playback_buttons("playing")
+
+    def _init_player(self):
+        """Create a fresh QMediaPlayer + QAudioOutput."""
         self._audio_output = QAudioOutput()
         self._audio_output.setVolume(1.0)
         self._player = QMediaPlayer()
         self._player.setAudioOutput(self._audio_output)
-        self._player.setSource(QUrl.fromLocalFile(mp3_path))
+        self._player.playbackStateChanged.connect(self._on_playback_state_changed)
+
+    def _on_play(self):
+        """Play the full source audio file."""
+        if not self._source_path or not self._peaks:
+            return
+
+        if self._player and self._player.playbackState() == QMediaPlayer.PlaybackState.PausedState:
+            self._player.play()
+            self._set_playback_buttons("playing")
+            return
+
+        self._stop_playback()
+        self._init_player()
+        self._player.setSource(QUrl.fromLocalFile(self._source_path))
         self._player.play()
+        self._set_playback_buttons("playing")
+
+    def _on_pause(self):
+        if self._player and self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._player.pause()
+            self._set_playback_buttons("paused")
+
+    def _on_stop(self):
+        self._stop_playback()
 
     def _stop_playback(self):
+        self._cursor_timer.stop()
         if self._player:
             self._player.stop()
             self._player.deleteLater()
@@ -552,3 +731,42 @@ class WaveformWidget(QWidget):
         if self._audio_output:
             self._audio_output.deleteLater()
             self._audio_output = None
+        if self._cursor:
+            self._cursor.hide()
+        self._set_playback_buttons("stopped")
+
+    def _on_playback_state_changed(self, state):
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self._cursor_timer.start()
+            if self._cursor:
+                self._cursor.show()
+        elif state == QMediaPlayer.PlaybackState.StoppedState:
+            self._cursor_timer.stop()
+            if self._cursor:
+                self._cursor.hide()
+            self._set_playback_buttons("stopped")
+        elif state == QMediaPlayer.PlaybackState.PausedState:
+            self._cursor_timer.stop()
+
+    def _update_cursor_position(self):
+        if not self._player or not self._peaks or self._duration <= 0:
+            return
+        position_ms = self._player.position()
+        position_sec = position_ms / 1000.0
+        px_per_sec = len(self._peaks) / self._duration
+        cursor_x = position_sec * px_per_sec
+        if self._cursor:
+            self._cursor.setPos(cursor_x, 0)
+            self._cursor.show()
+        # Update time display
+        mins = int(position_sec // 60)
+        secs = int(position_sec % 60)
+        total_mins = int(self._duration // 60)
+        total_secs = int(self._duration % 60)
+        self.time_label.setText(f"{mins}:{secs:02d} / {total_mins}:{total_secs:02d}")
+
+    def _set_playback_buttons(self, state: str):
+        has_source = bool(self._source_path and self._peaks)
+        self.play_btn.setEnabled(has_source and state != "playing")
+        self.pause_btn.setEnabled(state == "playing")
+        self.stop_btn.setEnabled(state in ("playing", "paused"))
