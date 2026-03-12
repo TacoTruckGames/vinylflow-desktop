@@ -30,8 +30,10 @@ class TrackItem(QWidget):
         self.end = end
         self.duration = end - start
 
+        self.setMinimumHeight(52)
+
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(8)
 
         # Color indicator
@@ -143,7 +145,9 @@ class TracksPanel(QWidget):
             item_widget.delete_clicked.connect(self.track_deleted.emit)
 
             list_item = QListWidgetItem()
-            list_item.setSizeHint(item_widget.sizeHint())
+            hint = item_widget.sizeHint()
+            hint.setHeight(max(hint.height(), 56))
+            list_item.setSizeHint(hint)
             self.track_list.addItem(list_item)
             self.track_list.setItemWidget(list_item, item_widget)
 
