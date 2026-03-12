@@ -4,10 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VinylFlow</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <script src="https://unpkg.com/wavesurfer.js@7.8.10/dist/wavesurfer.min.js"></script>
-    <script src="https://unpkg.com/wavesurfer.js@7.8.10/dist/plugins/regions.min.js"></script>
+    <script src="/static/vendor/tailwind.js"></script>
+    <script defer src="/static/vendor/alpine.min.js"></script>
+    <script src="/static/vendor/wavesurfer.min.js"></script>
+    <script src="/static/vendor/wavesurfer-regions.min.js"></script>
     <style>
         [x-cloak] { display: none !important; }
 
@@ -201,10 +201,53 @@
             border-radius: 50%;
             animation: spin 0.8s linear infinite;
         }
+
+        /* Loading Screen */
+        .loading-screen {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background-color: #F0EFEB;
+            z-index: 9999;
+            transition: opacity 0.3s ease-out;
+        }
+
+        .loading-screen .spinner-lg {
+            width: 48px;
+            height: 48px;
+            border: 4px solid rgba(229, 161, 0, 0.3);
+            border-top-color: #E5A100;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        /* Update Banner */
+        .update-banner {
+            background-color: rgba(229, 161, 0, 0.15);
+            border-bottom: 1px solid #E5A100;
+        }
     </style>
 </head>
 <body class="bg-page">
     <div x-data="vinylApp()" x-init="init()" class="min-h-screen">
+
+        <!-- Loading Screen -->
+        <div x-show="!appReady" class="loading-screen">
+            <h1 class="text-3xl font-bold text-primary mb-4">VinylFlow</h1>
+            <div class="spinner-lg"></div>
+            <p class="text-muted mt-4 text-sm">Loading...</p>
+        </div>
+
+        <!-- Update Banner -->
+        <div x-show="updateAvailable" x-cloak class="update-banner px-4 py-2 text-center text-sm">
+            <span class="text-secondary">A new version (<span x-text="updateVersion"></span>) is available.</span>
+            <button @click="downloadUpdate()" class="ml-2 font-semibold hover:underline" style="color: #E5A100;">Download</button>
+            <button @click="updateAvailable = false" class="ml-2 text-muted hover:text-secondary">Dismiss</button>
+        </div>
+
         <!-- Header -->
         <header class="bg-header shadow-sm">
             <div class="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
@@ -212,9 +255,14 @@
                     <h1 class="text-3xl font-bold text-white">
                     VinylFlow
                     </h1>
-                    <button @click="showSettings = !showSettings" class="px-4 py-2 bg-white bg-opacity-10 hover:bg-opacity-20 text-white rounded-lg transition">
-                        ⚙️ Settings
-                    </button>
+                    <div class="flex items-center gap-2">
+                        <button @click="minimizeToTray()" class="px-3 py-2 bg-white bg-opacity-10 hover:bg-opacity-20 text-white rounded-lg transition text-sm" title="Minimize to tray">
+                            _
+                        </button>
+                        <button @click="showSettings = !showSettings" class="px-4 py-2 bg-white bg-opacity-10 hover:bg-opacity-20 text-white rounded-lg transition">
+                            Settings
+                        </button>
+                    </div>
                 </div>
             </div>
         </header>
@@ -267,7 +315,7 @@
                             <strong>Don't have a token yet?</strong>
                         </p>
                         <ol class="text-sm text-secondary space-y-1 list-decimal list-inside">
-                            <li>Go to <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noopener noreferrer" class="font-semibold hover:underline" style="color: #E5A100;">Discogs Settings</a></li>
+                            <li><a href="#" @click.prevent="openExternalUrl('https://www.discogs.com/settings/developers')" class="font-semibold hover:underline" style="color: #E5A100;">Open Discogs Settings</a></li>
                             <li>Click "Generate new token"</li>
                             <li>Copy and paste it above</li>
                         </ol>
@@ -296,7 +344,7 @@
         <!-- Discogs Not Configured Warning (for users who skip setup) -->
         <div x-show="!discogsConfigured && !setupRequired" x-cloak class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-4">
             <div class="p-4 rounded-lg border-2 flex items-center gap-3" style="background-color: rgba(217, 64, 50, 0.1); border-color: #D94032;">
-                <span class="text-2xl">⚠️</span>
+                <span class="text-2xl">!</span>
                 <div>
                     <p class="font-semibold text-primary">Discogs API not configured</p>
                     <p class="text-sm text-secondary">
@@ -322,7 +370,7 @@
                     <div>
                         <label class="block text-sm font-medium text-secondary mb-1">Output Folder</label>
                         <div class="flex gap-2">
-                            <input type="text" x-model="config.output_dir" class="flex-1 px-3 py-2 border focus-primary rounded-md" style="border-color: #8A8A86;" placeholder="/Users/you/Music/VinylFlow">
+                            <input type="text" x-model="config.output_dir" class="flex-1 px-3 py-2 border focus-primary rounded-md" style="border-color: #8A8A86;" placeholder="C:\Users\you\Music\VinylFlow">
                             <button @click="chooseOutputFolder()" type="button" class="px-3 py-2 rounded-md text-primary hover:bg-page" style="background-color: #F0EFEB;">Browse</button>
                         </div>
                     </div>
@@ -351,7 +399,7 @@
                                 </div>
                             </div>
                             <div x-show="discogsConfigured" class="text-xs" style="color: #10B981;">
-                                ✓ Connected to Discogs
+                                Connected to Discogs
                             </div>
                         </div>
                     </div>
@@ -367,13 +415,12 @@
         <!-- Context Menu for Waveform Splits -->
         <div x-show="contextMenu.show"
              x-cloak
-             @click.away="if (!$event.ctrlKey) contextMenu.show = false"
+             @click.away="contextMenu.show = false"
              class="fixed bg-card rounded-lg shadow-lg border z-50 py-1"
              style="border-color: #8A8A86;"
              :style="`left: ${contextMenu.x}px; top: ${contextMenu.y}px;`">
             <button @click="splitAtContextMenu()"
                     class="w-full px-4 py-2 text-left text-primary hover:bg-page flex items-center gap-2">
-                <span>✂️</span>
                 <span>Add split</span>
             </button>
         </div>
@@ -381,18 +428,16 @@
         <!-- Context Menu for Region Actions -->
         <div x-show="regionContextMenu.show"
              x-cloak
-             @click.away="if (!$event.ctrlKey) regionContextMenu.show = false"
+             @click.away="regionContextMenu.show = false"
              class="fixed bg-card rounded-lg shadow-lg border z-50 py-1"
              style="border-color: #8A8A86;"
              :style="`left: ${regionContextMenu.x}px; top: ${regionContextMenu.y}px;`">
             <button @click="splitAtRegionContextMenu()"
                     class="w-full px-4 py-2 text-left text-primary hover:bg-page flex items-center gap-2">
-                <span>✂️</span>
                 <span>Add split</span>
             </button>
             <button @click="deleteTrackFromRegionMenu()"
                     class="w-full px-4 py-2 text-left text-primary hover:bg-page flex items-center gap-2">
-                <span>🗑️</span>
                 <span>Delete Track</span>
             </button>
         </div>
@@ -407,13 +452,13 @@
                         @drop.prevent="handleDrop($event)"
                         @dragover.prevent="dragging = true"
                         @dragleave.prevent="dragging = false"
-                        @click="$refs.fileInput.click()"
+                        @click="selectInputFiles()"
                         :class="{'dragging': dragging}"
                         class="file-upload-zone rounded-lg p-6 text-center cursor-pointer"
                     >
-                        <p class="text-secondary">📤 Drag & Drop audio files here</p>
-                        <p class="text-muted text-sm mt-1">WAV, AIFF supported — or click to browse</p>
-                        <input type="file" x-ref="fileInput" @change="handleFileSelect($event)" accept=".wav,.aiff,.aif" multiple class="hidden">
+                        <p class="text-secondary">Drag & Drop audio files here</p>
+                        <p class="text-muted text-sm mt-1">WAV, AIFF, FLAC supported — or click to browse</p>
+                        <input type="file" x-ref="fileInput" @change="handleFileSelect($event)" accept=".wav,.aiff,.aif,.flac" multiple class="hidden">
                     </div>
 
                     <!-- Upload Progress Bar -->
@@ -446,7 +491,7 @@
                                             <p class="text-xs text-muted" x-text="formatSize(file.size) + ' • ' + formatDuration(file.duration)"></p>
                                             <p class="text-xs mt-1" :class="statusClass(file.status)" x-text="file.status"></p>
                                         </div>
-                                        <button @click.stop="removeFile(file.id)" class="ml-2 btn-danger hover:opacity-80 px-2 py-1 rounded text-xs">✕</button>
+                                        <button @click.stop="removeFile(file.id)" class="ml-2 btn-danger hover:opacity-80 px-2 py-1 rounded text-xs">X</button>
                                     </div>
                                     <template x-if="file.id === currentFileId && processingProgress > 0">
                                         <div class="mt-1">
@@ -472,14 +517,14 @@
                         <!-- Analyze Button -->
                         <template x-if="!detectedTracks.length && currentFile">
                             <button @click="analyzeFile()" class="mt-3 px-4 py-2 btn-primary rounded-lg font-semibold text-sm">
-                                🔍 Analyze & Detect Tracks
+                                Analyze & Detect Tracks
                             </button>
                         </template>
 
                         <!-- Re-Analyze Button -->
                         <template x-if="detectedTracks.length > 0 && !selectedRelease">
                             <button @click="reanalyzeFile()" class="mt-3 px-4 py-2 btn-primary rounded-lg font-semibold text-sm">
-                                🔄 Re-Analyze Tracks
+                                Re-Analyze Tracks
                             </button>
                         </template>
                     </div>
@@ -493,10 +538,10 @@
                 <div class="flex justify-between items-center mb-6">
                     <h3 class="text-2xl font-bold text-primary">Waveform Editor</h3>
                     <div class="flex gap-2">
-                        <button @click="playWaveform()" :disabled="!waveform" class="px-4 py-2 btn-primary rounded-lg">▶️ Play</button>
-                        <button @click="stopWaveform()" :disabled="!waveform" class="px-4 py-2 btn-danger rounded-lg">⏹️ Stop</button>
-                        <button @click="zoomIn()" :disabled="!waveform" class="px-4 py-2 text-white rounded-lg" style="background-color: #3D3D3D;">🔍 +</button>
-                        <button @click="zoomOut()" :disabled="!waveform" class="px-4 py-2 text-white rounded-lg" style="background-color: #3D3D3D;">🔍 -</button>
+                        <button @click="playWaveform()" :disabled="!waveform" class="px-4 py-2 btn-primary rounded-lg">Play</button>
+                        <button @click="stopWaveform()" :disabled="!waveform" class="px-4 py-2 btn-danger rounded-lg">Stop</button>
+                        <button @click="zoomIn()" :disabled="!waveform" class="px-4 py-2 text-white rounded-lg" style="background-color: #3D3D3D;">Zoom +</button>
+                        <button @click="zoomOut()" :disabled="!waveform" class="px-4 py-2 text-white rounded-lg" style="background-color: #3D3D3D;">Zoom -</button>
                     </div>
                 </div>
             </div>
@@ -504,7 +549,7 @@
             <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
                 <div x-show="waveformLoading" class="text-center text-secondary py-8 text-lg">Loading waveform...</div>
                 <div x-show="!waveform && !waveformLoading" class="text-center text-muted py-8">Waveform will appear after analysis completes</div>
-                <p class="text-sm text-muted">💡 Tip: Drag the colored regions to adjust track boundaries, or right-click to add splits</p>
+                <p class="text-sm text-muted">Tip: Drag the colored regions to adjust track boundaries, or right-click to add splits</p>
             </div>
         </div>
 
@@ -522,7 +567,7 @@
                         <div x-show="currentPlayingTrack" class="mb-4 p-4 rounded-lg" style="background-color: rgba(229, 161, 0, 0.1);">
                             <div class="flex items-center justify-between mb-2">
                                 <span class="font-medium text-primary">Playing Track <span x-text="currentPlayingTrack"></span></span>
-                                <button @click="stopPreview()" class="px-3 py-1 btn-danger rounded text-sm">⏹️ Stop</button>
+                                <button @click="stopPreview()" class="px-3 py-1 btn-danger rounded text-sm">Stop</button>
                             </div>
                             <audio x-ref="audioPlayer" controls class="w-full"></audio>
                         </div>
@@ -533,14 +578,14 @@
                                         <div class="flex items-center gap-2">
                                             <input type="checkbox" :checked="track.ignored" @change="toggleTrackIgnored(track)" class="w-4 h-4 rounded" style="accent-color: #D94032;" title="Ignore this track">
                                             <label class="text-xs text-muted cursor-pointer" @click="toggleTrackIgnored(track)">Ignore</label>
-                                            <button @click="playPreview(track.number)" :disabled="track.ignored" class="px-3 py-1 btn-primary rounded text-sm" title="Play 30-second preview">▶️ Play</button>
+                                            <button @click="playPreview(track.number)" :disabled="track.ignored" class="px-3 py-1 btn-primary rounded text-sm" title="Play 30-second preview">Play</button>
                                             <span class="font-medium text-primary" :class="{ 'line-through text-muted': track.ignored }">Track <span x-text="track.number"></span></span>
                                         </div>
                                         <div class="flex gap-2">
-                                            <button @click="deleteTrack(track.number)" class="px-3 py-1 btn-danger rounded text-sm" title="Delete this track">🗑️ Delete</button>
+                                            <button @click="deleteTrack(track.number)" class="px-3 py-1 btn-danger rounded text-sm" title="Delete this track">Delete</button>
                                             <button @click="track.editing = !track.editing" :disabled="track.ignored" class="px-3 py-1 rounded text-sm text-primary" style="background-color: #F0EFEB;" :class="{'opacity-50 cursor-not-allowed': track.ignored}">
-                                                <span x-show="!track.editing">✏️ Adjust</span>
-                                                <span x-show="track.editing">✓ Done</span>
+                                                <span x-show="!track.editing">Adjust</span>
+                                                <span x-show="track.editing">Done</span>
                                             </button>
                                         </div>
                                     </div>
@@ -564,7 +609,7 @@
 
                     <!-- Discogs Search -->
                     <div x-show="detectedTracks.length > 0 && !selectedRelease" x-cloak class="bg-card rounded-lg shadow p-6">
-                        <h3 class="text-lg font-semibold text-primary mb-4">🔍 Search Discogs</h3>
+                        <h3 class="text-lg font-semibold text-primary mb-4">Search Discogs</h3>
                         <div class="flex gap-2 mb-4">
                             <input type="text" x-model="searchQuery" @keyup.enter="searchDiscogs()" placeholder="Enter artist or album name..." class="flex-1 px-4 py-2 border focus-primary rounded-lg" style="border-color: #8A8A86;">
                             <button @click="searchDiscogs()" class="px-6 py-2 btn-primary rounded-lg font-semibold">Search</button>
@@ -583,7 +628,7 @@
                                     <p class="font-semibold text-sm truncate text-primary" x-text="result.artist"></p>
                                     <p class="text-xs text-secondary truncate" x-text="result.title"></p>
                                     <p class="text-xs text-muted" x-text="result.year"></p>
-                                    <a @click.stop :href="`https://www.discogs.com${result.uri}`" target="_blank" rel="noopener noreferrer" class="text-xs hover:underline mt-1 inline-block" style="color: #E5A100;">View on Discogs ↗</a>
+                                    <a @click.stop.prevent="openExternalUrl(`https://www.discogs.com${result.uri}`)" class="text-xs hover:underline mt-1 inline-block cursor-pointer" style="color: #E5A100;">View on Discogs</a>
                                 </div>
                             </template>
                         </div>
@@ -592,17 +637,17 @@
                     <!-- Track Mapping -->
                     <div x-show="selectedRelease" x-cloak class="bg-card rounded-lg shadow p-6">
                         <div class="flex justify-between items-center mb-4">
-                            <h3 class="text-lg font-semibold text-primary">🎚️ Track Mapping</h3>
+                            <h3 class="text-lg font-semibold text-primary">Track Mapping</h3>
                             <div class="flex gap-2">
-                                <button @click="reverseMapping()" class="px-4 py-2 rounded-lg text-primary hover:bg-page" style="background-color: #F0EFEB;">↕️ Reverse</button>
-                                <button @click="selectedRelease = null; searchResults = []" class="px-4 py-2 rounded-lg text-primary hover:bg-page" style="background-color: #F0EFEB;">← Back</button>
+                                <button @click="reverseMapping()" class="px-4 py-2 rounded-lg text-primary hover:bg-page" style="background-color: #F0EFEB;">Reverse</button>
+                                <button @click="selectedRelease = null; searchResults = []" class="px-4 py-2 rounded-lg text-primary hover:bg-page" style="background-color: #F0EFEB;">Back</button>
                             </div>
                         </div>
 
                         <!-- Track Count Mismatch Warning -->
                         <div x-show="trackCountMismatch" class="mb-4 p-4 rounded-lg border-2" style="background-color: rgba(217, 64, 50, 0.1); border-color: #D94032;">
                             <div class="flex items-start gap-3">
-                                <span class="text-2xl">⚠️</span>
+                                <span class="text-2xl">!</span>
                                 <div class="flex-1">
                                     <p class="font-semibold text-primary mb-1">Track Count Mismatch</p>
                                     <p class="text-sm text-secondary mb-2">
@@ -610,7 +655,7 @@
                                         but Discogs shows <span class="font-semibold" x-text="selectedRelease?.tracks.length"></span> tracks.
                                     </p>
                                     <p class="text-xs text-muted">
-                                        💡 Scroll up to the waveform and right-click to add splits, or right-click a track region to ignore it.
+                                        Scroll up to the waveform and right-click to add splits, or right-click a track region to ignore it.
                                     </p>
                                 </div>
                             </div>
@@ -674,7 +719,7 @@
 
                         <!-- Process Button -->
                         <button @click="processFile()" :disabled="isProcessing" class="w-full px-6 py-3 btn-primary rounded-lg font-bold text-lg">
-                            <span x-show="!isProcessing">✓ Process & Save</span>
+                            <span x-show="!isProcessing">Process & Save</span>
                             <span x-show="isProcessing" class="flex items-center justify-center gap-2">
                                 <div class="spinner"></div>
                                 Processing...
@@ -685,11 +730,16 @@
 
                     <!-- Success Message -->
                     <div x-show="successMessage" x-cloak class="rounded-lg p-6" style="background-color: rgba(229, 161, 0, 0.1); border: 2px solid #E5A100;">
-                        <h3 class="text-lg font-bold text-primary mb-2">✓ Processing Complete!</h3>
+                        <h3 class="text-lg font-bold text-primary mb-2">Processing Complete!</h3>
                         <p class="text-secondary" x-text="successMessage"></p>
-                        <button @click="resetForNextFile()" class="mt-4 px-6 py-2 btn-primary rounded-lg">
-                            Process Next File
-                        </button>
+                        <div class="flex gap-3 mt-4">
+                            <button @click="openOutputFolder()" class="px-6 py-2 btn-primary rounded-lg">
+                                Open in Explorer
+                            </button>
+                            <button @click="resetForNextFile()" class="px-6 py-2 rounded-lg text-primary hover:bg-page" style="background-color: #F0EFEB;">
+                                Process Next File
+                            </button>
+                        </div>
                     </div>
             </div>
         </div>
@@ -698,16 +748,16 @@
         <footer class="bg-header mt-12 py-6 border-t" style="border-color: #3D3D3D;">
             <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
                 <p class="text-muted text-sm mb-2">
-                    Built with ❤️ for vinyl enthusiasts
+                    Built for vinyl enthusiasts
                 </p>
                 <p class="text-sm">
-                    <a href="https://vinylflow.app/" target="_blank" rel="noopener noreferrer" class="font-semibold hover:underline" style="color: #E5A100;">vinylflow.app</a>
-                    <span class="text-muted mx-2">•</span>
-                    <a href="https://vinylflow.app/contact" target="_blank" rel="noopener noreferrer" class="text-muted hover:underline">Contact Us</a>
-                    <span class="text-muted mx-2">•</span>
-                    <a href="https://buymeacoffee.com/olimic1000" target="_blank" rel="noopener noreferrer" class="text-muted hover:underline">Like The App? Buy Us A Coffee</a>
-                    <span class="text-muted mx-2">•</span>
-                    <span class="text-muted">© 2026 VinylFlow</span>
+                    <a href="#" @click.prevent="openExternalUrl('https://vinylflow.app/')" class="font-semibold hover:underline" style="color: #E5A100;">vinylflow.app</a>
+                    <span class="text-muted mx-2">&bull;</span>
+                    <a href="#" @click.prevent="openExternalUrl('https://vinylflow.app/contact')" class="text-muted hover:underline">Contact Us</a>
+                    <span class="text-muted mx-2">&bull;</span>
+                    <a href="#" @click.prevent="openExternalUrl('https://buymeacoffee.com/olimic1000')" class="text-muted hover:underline">Like The App? Buy Us A Coffee</a>
+                    <span class="text-muted mx-2">&bull;</span>
+                    <span class="text-muted">&copy; 2026 VinylFlow</span>
                 </p>
             </div>
         </footer>

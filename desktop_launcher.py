@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
 """
-VinylFlow Desktop Launcher
+VinylFlow Desktop Launcher (Windows-only)
 
-Runs VinylFlow in a no-Docker local desktop mode:
-- Uses writable user directories for config/temp/output
-- Starts the FastAPI backend locally
-- Opens a native desktop app window (WebView2 on Windows, WKWebView on macOS)
+Runs VinylFlow as a native Windows desktop application:
+- Enforces single instance via a named mutex
+- Starts the FastAPI backend on a dynamic port
+- Opens a pywebview window (WebView2 / edgechromium)
+- Persists and restores window geometry
+- Integrates system tray and auto-update checker
 """
 
+import ctypes
+import ctypes.wintypes
+import json
+import logging
 import os
+import subprocess
 import sys
-import time
 import threading
-import webbrowser
-from socket import create_connection
+import time
 from pathlib import Path
+from socket import create_connection
 
 import uvicorn
 
-# Must be set before `import webview` so pywebview picks up the correct backend.
-if sys.platform.startswith("win"):
-    os.environ.setdefault("PYWEBVIEW_GUI", "edgechromium")
+# Must be set before `import webview` so pywebview picks the correct backend.
+os.environ.setdefault("PYWEBVIEW_GUI", "edgechromium")
 
 # Point requests/urllib3 at the bundled certifi CA bundle when running from a
 # PyInstaller one-folder bundle.  The runtime hook already does this, but we
@@ -44,10 +49,130 @@ except Exception as exc:
     _WEBVIEW_IMPORT_ERROR = exc
 
 
-APP_NAME = "VinylFlow"
+logger = logging.getLogger(__name__)
 
+APP_NAME = "VinylFlow"
+MUTEX_NAME = "Global\\VinylFlow_SingleInstance_Mutex"
+
+# ---------------------------------------------------------------------------
+# Icon path helper
+# ---------------------------------------------------------------------------
+
+def _icon_path() -> str:
+    """Return the path to VinylFlow.ico, works in dev and bundled modes."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        p = Path(meipass) / "assets" / "VinylFlow.ico"
+        if p.exists():
+            return str(p)
+    p = Path(__file__).parent / "assets" / "VinylFlow.ico"
+    if p.exists():
+        return str(p)
+    return ""
+
+# ---------------------------------------------------------------------------
+# Single-instance enforcement
+# ---------------------------------------------------------------------------
+
+_mutex_handle = None
+
+
+def _acquire_single_instance() -> bool:
+    """Try to acquire a named mutex.  Returns True if this is the first instance."""
+    global _mutex_handle
+    kernel32 = ctypes.windll.kernel32
+    _mutex_handle = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    last_error = ctypes.get_last_error()
+    # ERROR_ALREADY_EXISTS = 183
+    if last_error == 183:
+        kernel32.CloseHandle(_mutex_handle)
+        _mutex_handle = None
+        return False
+    return True
+
+
+def _show_already_running_message() -> None:
+    ctypes.windll.user32.MessageBoxW(
+        0,
+        "VinylFlow is already running.\n\nCheck your system tray for the VinylFlow icon.",
+        "VinylFlow",
+        0x00000040,  # MB_ICONINFORMATION
+    )
+
+
+# ---------------------------------------------------------------------------
+# Window state persistence
+# ---------------------------------------------------------------------------
+
+def _settings_path() -> Path:
+    config_dir = os.getenv("VINYLFLOW_CONFIG_DIR")
+    if config_dir:
+        return Path(config_dir) / "settings.json"
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / APP_NAME / "config" / "settings.json"
+    return Path.home() / "AppData" / "Roaming" / APP_NAME / "config" / "settings.json"
+
+
+def _load_settings() -> dict:
+    path = _settings_path()
+    if path.exists():
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_settings(settings: dict) -> None:
+    path = _settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(path, "w") as f:
+            json.dump(settings, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save settings: {e}")
+
+
+def _load_window_state() -> dict:
+    settings = _load_settings()
+    return settings.get("window", {"width": 1280, "height": 900})
+
+
+def _save_window_state(window) -> None:
+    try:
+        settings = _load_settings()
+        settings["window"] = {
+            "x": window.x,
+            "y": window.y,
+            "width": window.width,
+            "height": window.height,
+        }
+        _save_settings(settings)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Desktop API exposed to frontend via window.pywebview.api
+# ---------------------------------------------------------------------------
 
 class DesktopApi:
+    def __init__(self):
+        self._window = None
+        self._tray = None
+        self._server_port = 8000
+
+    def set_window(self, window):
+        self._window = window
+
+    def set_tray(self, tray):
+        self._tray = tray
+
+    def set_server_port(self, port: int):
+        self._server_port = port
+
     def select_output_folder(self, initial_path: str = "") -> str | None:
         if webview is None:
             return None
@@ -71,10 +196,71 @@ class DesktopApi:
         except Exception:
             return None
 
+    def select_input_files(self) -> list[str] | None:
+        """Open a native Windows file dialog filtered to supported audio formats."""
+        if webview is None:
+            return None
+        try:
+            window = webview.windows[0]
+            file_types = ("Audio Files (*.wav;*.aiff;*.aif;*.flac)",)
 
-def _macos_app_support_dir() -> Path:
-    return Path.home() / "Library" / "Application Support" / APP_NAME
+            dialog_type = webview.OPEN_DIALOG
+            if hasattr(webview, "FileDialog") and hasattr(webview.FileDialog, "OPEN"):
+                dialog_type = webview.FileDialog.OPEN
 
+            result = window.create_file_dialog(
+                dialog_type,
+                allow_multiple=True,
+                file_types=file_types,
+            )
+            if not result:
+                return None
+            return [str(p) for p in result]
+        except Exception:
+            return None
+
+    def open_folder(self, path: str) -> bool:
+        """Open a folder in Windows Explorer."""
+        try:
+            os.startfile(path)
+            return True
+        except Exception:
+            return False
+
+    def reveal_in_explorer(self, path: str) -> bool:
+        """Highlight a file in Windows Explorer."""
+        try:
+            subprocess.Popen(["explorer", "/select,", path])
+            return True
+        except Exception:
+            return False
+
+    def get_app_version(self) -> str:
+        from version import __version__
+        return __version__
+
+    def open_url(self, url: str) -> bool:
+        """Open a URL in the default browser."""
+        try:
+            os.startfile(url)
+            return True
+        except Exception:
+            return False
+
+    def minimize_to_tray(self) -> None:
+        """Hide the window and keep running in the system tray."""
+        if self._window:
+            self._window.hide()
+
+    def notify(self, title: str, message: str) -> None:
+        """Show a system tray notification."""
+        if self._tray:
+            self._tray.show_notification(title, message)
+
+
+# ---------------------------------------------------------------------------
+# Environment & path setup
+# ---------------------------------------------------------------------------
 
 def _windows_app_support_dir() -> Path:
     appdata = os.environ.get("APPDATA")
@@ -84,30 +270,18 @@ def _windows_app_support_dir() -> Path:
 
 
 def _bundled_ffmpeg_path() -> Path | None:
-    """Return path to bundled ffmpeg binary, or None if not found."""
+    """Return path to bundled ffmpeg.exe, or None if not found."""
     meipass = getattr(sys, "_MEIPASS", None)
     if not meipass:
         return None
-
-    ffmpeg_dir = Path(meipass) / "ffmpeg_bin"
-    # On Windows the binary name includes the .exe extension.
-    candidates = ["ffmpeg.exe", "ffmpeg"] if sys.platform.startswith("win") else ["ffmpeg"]
-    for name in candidates:
-        path = ffmpeg_dir / name
-        if path.exists() and path.is_file():
-            return path
+    path = Path(meipass) / "ffmpeg_bin" / "ffmpeg.exe"
+    if path.exists() and path.is_file():
+        return path
     return None
 
 
 def _check_webview2_available() -> bool:
-    """
-    Return True if the Microsoft WebView2 Runtime is installed.
-    Only meaningful on Windows; always returns True on other platforms.
-    WebView2 is pre-installed on Windows 11.  On Windows 10 it ships with
-    Microsoft Edge, but may be absent on fresh / locked-down installs.
-    """
-    if not sys.platform.startswith("win"):
-        return True
+    """Return True if the Microsoft WebView2 Runtime is installed."""
     try:
         import winreg
         client_guid = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
@@ -127,13 +301,21 @@ def _check_webview2_available() -> bool:
     return False
 
 
+def _find_available_port(start: int = 8000, end: int = 8100) -> int:
+    """Find the first available port in the given range."""
+    import socket
+    for port in range(start, end):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", port))
+                return port
+        except OSError:
+            continue
+    return start  # fallback
+
+
 def configure_desktop_environment() -> tuple[str, int]:
-    if sys.platform.startswith("win"):
-        app_data_dir = _windows_app_support_dir()
-    elif sys.platform == "darwin":
-        app_data_dir = _macos_app_support_dir()
-    else:
-        app_data_dir = Path.home() / ".config" / APP_NAME
+    app_data_dir = _windows_app_support_dir()
 
     config_dir = app_data_dir / "config"
     upload_dir = app_data_dir / "temp_uploads"
@@ -147,7 +329,6 @@ def configure_desktop_environment() -> tuple[str, int]:
     os.environ.setdefault("VINYLFLOW_UPLOAD_DIR", str(upload_dir))
     os.environ.setdefault("DEFAULT_OUTPUT_DIR", str(output_dir))
     os.environ.setdefault("HOST", "127.0.0.1")
-    os.environ.setdefault("PORT", "8000")
     os.environ.setdefault("AUTO_OPEN_BROWSER", "0")
 
     bundled_ffmpeg = _bundled_ffmpeg_path()
@@ -164,17 +345,21 @@ def configure_desktop_environment() -> tuple[str, int]:
             os.environ["PATH"] = os.pathsep.join([ffmpeg_dir, *path_parts])
 
     host = os.environ["HOST"]
-    port = int(os.environ["PORT"])
+    port = _find_available_port()
+    os.environ["PORT"] = str(port)
     return host, port
 
 
+# ---------------------------------------------------------------------------
+# Server management
+# ---------------------------------------------------------------------------
+
 def _run_server(host: str, port: int) -> None:
     from backend.api import app
-
     uvicorn.run(app, host=host, port=port)
 
 
-def _wait_for_server(host: str, port: int, timeout: float = 10.0) -> bool:
+def _wait_for_server(host: str, port: int, timeout: float = 15.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -185,64 +370,178 @@ def _wait_for_server(host: str, port: int, timeout: float = 10.0) -> bool:
     return False
 
 
-def _open_browser_fallback(app_url: str, server_thread: threading.Thread) -> None:
-    """Open app in default browser and keep the server alive."""
-    webbrowser.open(app_url)
-    while server_thread.is_alive():
-        time.sleep(0.5)
+# ---------------------------------------------------------------------------
+# Auto-update (background)
+# ---------------------------------------------------------------------------
 
+def _check_update_background(window) -> None:
+    """Check for updates in a background thread; push banner via JS if available."""
+    try:
+        from updater import check_for_update
+        result = check_for_update()
+        if result and result.get("update_available"):
+            version = result["latest_version"]
+            url = result["download_url"]
+            js = (
+                f"if(window._vinylflowShowUpdateBanner) "
+                f"window._vinylflowShowUpdateBanner('{version}','{url}');"
+            )
+            window.evaluate_js(js)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# File associations / command-line args
+# ---------------------------------------------------------------------------
+
+def _post_files_to_server(host: str, port: int, file_paths: list[str]) -> None:
+    """POST local file paths to /api/upload-local after the server is ready."""
+    import requests as req
+    try:
+        url = f"http://{host}:{port}/api/upload-local"
+        req.post(url, json={"file_paths": file_paths}, timeout=10)
+    except Exception as e:
+        logger.warning(f"Failed to post files to server: {e}")
+
+
+def _post_files_to_running_instance(file_paths: list[str]) -> None:
+    """Try to POST file paths to an already-running VinylFlow instance."""
+    import requests as req
+    # Scan ports 8000-8099 for a running instance
+    for port in range(8000, 8100):
+        try:
+            url = f"http://127.0.0.1:{port}/api/open-files"
+            resp = req.post(url, json={"file_paths": file_paths}, timeout=2)
+            if resp.status_code == 200:
+                return
+        except Exception:
+            continue
+
+
+def _collect_argv_files() -> list[str]:
+    """Collect file paths from sys.argv (passed by Windows shell associations)."""
+    files = []
+    for arg in sys.argv[1:]:
+        p = Path(arg)
+        if p.exists() and p.is_file() and p.suffix.lower() in {".wav", ".aiff", ".aif", ".flac"}:
+            files.append(str(p.resolve()))
+    return files
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 def main() -> None:
+    argv_files = _collect_argv_files()
+
+    # Single-instance check
+    if not _acquire_single_instance():
+        if argv_files:
+            _post_files_to_running_instance(argv_files)
+        else:
+            _show_already_running_message()
+        sys.exit(0)
+
     host, port = configure_desktop_environment()
     server_thread = threading.Thread(target=lambda: _run_server(host, port), daemon=True)
     server_thread.start()
 
     if not _wait_for_server(host, port):
-        raise RuntimeError(f"VinylFlow backend failed to start on http://{host}:{port}")
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            f"VinylFlow backend failed to start on http://{host}:{port}",
+            "VinylFlow — Startup Error",
+            0x00000010,  # MB_ICONERROR
+        )
+        sys.exit(1)
 
     app_url = f"http://{host}:{port}"
 
-    # --- webview not importable at all ---
+    # Post any files passed via command line
+    if argv_files:
+        threading.Thread(
+            target=lambda: _post_files_to_server(host, port, argv_files),
+            daemon=True,
+        ).start()
+
+    # Check pywebview
     if webview is None:
-        print(
-            f"[VinylFlow] pywebview unavailable ({_WEBVIEW_IMPORT_ERROR}). "
-            "Opening in default browser.",
-            file=sys.stderr,
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            f"pywebview is not available ({_WEBVIEW_IMPORT_ERROR}).\n\n"
+            "Please reinstall VinylFlow or install pywebview manually.",
+            "VinylFlow — Missing Dependency",
+            0x00000010,
         )
-        _open_browser_fallback(app_url, server_thread)
-        return
+        sys.exit(1)
 
-    # --- Windows: check WebView2 Runtime before attempting to start ---
-    if sys.platform.startswith("win") and not _check_webview2_available():
-        print(
-            "[VinylFlow] Microsoft WebView2 Runtime not found.\n"
-            "  Download: https://developer.microsoft.com/microsoft-edge/webview2/\n"
-            "  Opening in default browser as fallback.",
-            file=sys.stderr,
+    # Check WebView2
+    if not _check_webview2_available():
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            "Microsoft WebView2 Runtime is required but was not found.\n\n"
+            "Please download it from:\n"
+            "https://developer.microsoft.com/microsoft-edge/webview2/",
+            "VinylFlow — WebView2 Required",
+            0x00000010,
         )
-        _open_browser_fallback(app_url, server_thread)
-        return
+        sys.exit(1)
 
-    # --- Try native desktop window ---
+    # Load saved window state
+    win_state = _load_window_state()
+
+    desktop_api = DesktopApi()
+    desktop_api.set_server_port(port)
+
+    window = webview.create_window(
+        "VinylFlow",
+        app_url,
+        width=win_state.get("width", 1280),
+        height=win_state.get("height", 900),
+        x=win_state.get("x"),
+        y=win_state.get("y"),
+        min_size=(900, 700),
+        js_api=desktop_api,
+    )
+
+    desktop_api.set_window(window)
+
+    # System tray
+    tray = None
+    icon = _icon_path()
+
+    def on_tray_show():
+        if window:
+            window.show()
+            window.restore()
+
+    def on_tray_quit():
+        if window:
+            window.destroy()
+
     try:
-        webview.create_window(
-            "VinylFlow",
-            app_url,
-            width=1280,
-            height=900,
-            min_size=(900, 700),
-            js_api=DesktopApi(),
-        )
-        if sys.platform.startswith("win"):
-            webview.start(gui="edgechromium")
-        else:
-            webview.start()
-    except Exception as exc:
-        print(
-            f"[VinylFlow] Native window failed ({exc}). Opening in default browser.",
-            file=sys.stderr,
-        )
-        _open_browser_fallback(app_url, server_thread)
+        from system_tray import SystemTray
+        tray = SystemTray(icon, on_show=on_tray_show, on_quit=on_tray_quit)
+        tray.start()
+        desktop_api.set_tray(tray)
+    except Exception as e:
+        logger.warning(f"System tray unavailable: {e}")
+
+    # Save window state on close & start update check after load
+    def on_loaded():
+        threading.Thread(target=lambda: _check_update_background(window), daemon=True).start()
+
+    def on_closing():
+        _save_window_state(window)
+        if tray:
+            tray.stop()
+
+    window.events.loaded += on_loaded
+    window.events.closing += on_closing
+
+    webview.start(gui="edgechromium")
 
 
 if __name__ == "__main__":

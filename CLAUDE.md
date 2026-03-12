@@ -9,12 +9,14 @@ Desktop app to digitize vinyl records: upload a WAV/AIFF recording of a vinyl si
 
 | Layer | Technology |
 |-------|-----------|
-| Frontend | Alpine.js + Tailwind CSS + WaveSurfer.js (no build step, CDN) |
+| Frontend | Alpine.js + Tailwind CSS + WaveSurfer.js (bundled in `backend/static/vendor/`) |
 | Backend | FastAPI + uvicorn (Python) |
-| Desktop shell | pywebview (WKWebView on macOS, WebView2 on Windows) |
+| Desktop shell | pywebview (WebView2 / edgechromium) — **Windows only** |
+| System tray | pystray + Pillow |
 | Audio processing | FFmpeg (via subprocess) + Mutagen (tagging) + Pillow (cover art) |
 | Discogs API | `discogs-client` Python library |
 | Bundling | PyInstaller (`VinylFlow.spec`) |
+| Installer | Inno Setup (`installer/VinylFlow.iss`) |
 | CI/CD | GitHub Actions (`.github/workflows/`) |
 
 ---
@@ -27,19 +29,26 @@ vinylflow/
 │   ├── api.py              # FastAPI app — all REST endpoints + WebSocket
 │   └── static/
 │       ├── index.html      # Single-page UI (Alpine.js)
-│       ├── app.js          # Main frontend logic (~1000+ lines)
-│       └── fonts/          # Mirano Extended font family
+│       ├── app.js          # Main frontend logic
+│       ├── fonts/          # Mirano Extended font family
+│       └── vendor/         # Bundled CDN deps (Alpine, Tailwind, WaveSurfer)
+├── installer/
+│   └── VinylFlow.iss       # Inno Setup installer script
 ├── rthooks/
 │   └── rthook_vinylflow.py # PyInstaller runtime hook (runs before app code)
 ├── .github/workflows/
-│   ├── windows-release.yml # Manual trigger — builds Windows .exe via PyInstaller
+│   ├── windows-release.yml # Builds .exe + installer via PyInstaller + Inno Setup
 │   ├── privacy-guard.yml   # Scans commits for secrets
 │   └── release-artifact-scan.yml
 ├── config.py               # Config management (settings.json > .env > env vars)
 ├── audio_processor.py      # Silence detection, track splitting, ffmpeg wrappers
 ├── metadata_handler.py     # Discogs fetch, cover art download, audio tagging
-├── desktop_launcher.py     # Entry point — sets up dirs/env vars, starts FastAPI, opens window
-├── VinylFlow.spec          # PyInstaller spec (macOS .app + Windows .exe)
+├── desktop_launcher.py     # Entry point — Windows-only, single instance, tray, window state
+├── system_tray.py          # pystray-based system tray icon
+├── updater.py              # GitHub release auto-update checker
+├── version.py              # __version__ constant
+├── VinylFlow.spec          # PyInstaller spec (Windows only)
+├── version_info.txt        # Windows EXE version metadata for PyInstaller
 ├── requirements.txt
 └── README.md
 ```
@@ -78,7 +87,9 @@ audio_processor.py  metadata_handler.py  config.py    Discogs API
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/api/upload` | Upload WAV/AIFF, create session UUID, queue MP3 preview |
+| POST | `/api/upload` | Upload WAV/AIFF/FLAC via HTTP, create session UUID, queue MP3 preview |
+| POST | `/api/upload-local` | Register local file paths (no HTTP upload — symlink/copy) |
+| POST | `/api/open-files` | Accept file paths from second instance / file associations |
 | POST | `/api/analyze` | Silence detection → track boundaries |
 | POST | `/api/analyze-duration-based` | Fallback: tracks from Discogs durations |
 | GET | `/api/preview/{file_id}/{track_number}` | Generate 30s MP3 preview |
@@ -130,6 +141,8 @@ These rules are **critical** — violating them breaks the bundled app silently.
    - `PYTHONNET_RUNTIME_DLL` → bundled `Python.Runtime.dll`
    - `SSL_CERT_FILE` + `REQUESTS_CA_BUNDLE` → bundled `cacert.pem`
 6. Bundle `backend/static/` as data files so the frontend is served correctly.
+7. Bundle `assets/VinylFlow.ico` so the system tray icon is available at runtime.
+8. Set `version='version_info.txt'` in `EXE()` so Windows shows version info in file Properties.
 
 ---
 
@@ -137,7 +150,7 @@ These rules are **critical** — violating them breaks the bundled app silently.
 
 - `audio_processor.py` **must** call `_ffmpeg()` helper (not hardcode `"ffmpeg"`) — reads `VINYLFLOW_FFMPEG_PATH`.
 - Use `encoding='utf-8', errors='replace'` on subprocess calls — **not** `text=True` (breaks on Windows with non-ASCII).
-- `desktop_launcher.py` `_bundled_ffmpeg_path()` must try **both** `ffmpeg.exe` (Windows) and `ffmpeg` (macOS/Linux).
+- `desktop_launcher.py` `_bundled_ffmpeg_path()` looks for `ffmpeg.exe` only (Windows-only app).
 
 ---
 
@@ -148,13 +161,12 @@ These rules are **critical** — violating them breaks the bundled app silently.
 - **WaveSurfer.js** handles waveform rendering with draggable region markers for track boundaries.
 - WebSocket (`/ws`) receives real-time progress updates during processing.
 
-### macOS Context Menu Fix (critical)
-WKWebView intercepts right-click before JavaScript sees it. Fix applied in `init()`:
+### Context Menu Override
+WebView2 intercepts right-click before JavaScript sees it. Fix applied in `init()`:
 ```javascript
-// Capture phase — fires before WKWebView's shadow DOM handler
+// Capture phase — fires before WebView2's default handler
 document.addEventListener('contextmenu', e => e.preventDefault(), true);
 ```
-Also: guard `@click.away` with `!$event.ctrlKey` so Ctrl+click (which triggers `contextmenu` on macOS) doesn't immediately dismiss the custom context menu.
 
 ---
 
@@ -162,16 +174,16 @@ Also: guard `@click.away` with `!$event.ctrlKey` so Ctrl+click (which triggers `
 
 | Mode | Command | Notes |
 |------|---------|-------|
-| Docker | `docker compose up` | Recommended for self-hosting |
-| Desktop (bundled) | `VinylFlow.app` / `VinylFlow.exe` | PyInstaller build |
-| Local dev | `python desktop_launcher.py` | Opens browser or native window |
+| Desktop (installer) | `VinylFlow-Setup.exe` | Inno Setup installer, bundles WebView2 bootstrapper |
+| Desktop (portable) | `VinylFlow.exe` | PyInstaller one-folder bundle |
+| Local dev | `python desktop_launcher.py` | Opens native WebView2 window |
 | Backend only | `uvicorn backend.api:app --reload` | For API development |
 
 ---
 
 ## GitHub Actions
 
-- **`windows-release.yml`** — Manual trigger with `tag` input. Builds on `windows-latest`, installs FFmpeg via Chocolatey, runs PyInstaller, uploads `VinylFlow-windows-unsigned.zip` to the release.
+- **`windows-release.yml`** — Manual trigger with `tag` input. Builds on `windows-latest`, installs FFmpeg + Inno Setup via Chocolatey, runs PyInstaller, builds installer, uploads `VinylFlow-windows-unsigned.zip` and `VinylFlow-Setup-{version}.exe` to the release.
 - **`privacy-guard.yml`** — Scans commits for secrets.
 - **`release-artifact-scan.yml`** — Scans release assets before publishing.
 
@@ -184,10 +196,9 @@ Also: guard `@click.away` with `!$event.ctrlKey` so Ctrl+click (which triggers `
 | `backend/api.py` | `UPLOAD_DIR` ignored `VINYLFLOW_UPLOAD_DIR` env var (hardcoded `__file__` path) | Read env var at startup |
 | `backend/api.py` | `logger` NameError | Define logger before use |
 | `config.py` | `config.DEFAULT_SILENCE_THRESHOLD` (uppercase) | Lowercase attribute name |
-| `desktop_launcher.py` | `_bundled_ffmpeg_path()` only tried `'ffmpeg'`, not `'ffmpeg.exe'` | Try both |
+| `desktop_launcher.py` | `_bundled_ffmpeg_path()` only tried `'ffmpeg'`, not `'ffmpeg.exe'` | Windows-only: `ffmpeg.exe` |
 | `audio_processor.py` | Hardcoded `"ffmpeg"` instead of `_ffmpeg()` | Use helper; use `encoding='utf-8', errors='replace'` |
-| `backend/static/app.js` | Right-click opened WKWebView native menu on macOS | Capture-phase `preventDefault` in `init()` |
-| `backend/static/app.js` | Ctrl+click dismissed custom context menu immediately | Guard `@click.away` with `!$event.ctrlKey` |
+| `backend/static/app.js` | Right-click opened native menu in WebView | Capture-phase `preventDefault` in `init()` |
 | `VinylFlow.spec` | `ffmpeg.exe` UPX-packed → blocked by Windows Defender | Add to `upx_exclude` |
 
 ---
@@ -204,11 +215,12 @@ Also: guard `@click.away` with `!$event.ctrlKey` so Ctrl+click (which triggers `
 
 ```
 fastapi, uvicorn[standard]   # API server
-pywebview                    # Desktop window
+pywebview                    # Desktop window (WebView2)
+pystray                      # System tray icon
 mutagen                      # Audio tagging
 discogs-client               # Discogs API
 requests, certifi            # HTTP + SSL
-pillow                       # Cover art processing
+pillow                       # Cover art processing + tray icon
 numpy                        # Waveform peak generation
 python-dotenv                # .env parsing
 python-multipart             # File upload parsing

@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to update (e.g. v0.2.0-beta6)"
+        description: "Release tag to update (e.g. v1.0.0)"
         required: true
-        default: "v0.2.0-beta6"
+        default: "v1.0.0"
 
 permissions:
   contents: write
@@ -30,6 +30,11 @@ jobs:
           choco install ffmpeg -y
           ffmpeg -version
 
+      - name: Install Inno Setup
+        shell: powershell
+        run: |
+          choco install innosetup -y
+
       - name: Install Python dependencies
         shell: powershell
         run: |
@@ -42,19 +47,26 @@ jobs:
         run: |
           pyinstaller --clean -y VinylFlow.spec
 
-      - name: Package unsigned Windows app
+      - name: Package portable ZIP
         shell: powershell
         run: |
           if (Test-Path VinylFlow-windows-unsigned.zip) { Remove-Item VinylFlow-windows-unsigned.zip -Force }
           Compress-Archive -Path dist\VinylFlow\* -DestinationPath VinylFlow-windows-unsigned.zip
           Get-Item VinylFlow-windows-unsigned.zip | Format-List Name,Length,LastWriteTime
 
-      - name: Replace release asset
+      - name: Build installer with Inno Setup
+        shell: powershell
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\VinylFlow.iss
+          Get-Item dist\VinylFlow-Setup-*.exe | Format-List Name,Length,LastWriteTime
+
+      - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
         shell: powershell
         run: |
           gh release upload ${{ inputs.tag }} VinylFlow-windows-unsigned.zip --clobber
+          $installer = Get-Item dist\VinylFlow-Setup-*.exe
+          gh release upload ${{ inputs.tag }} $installer.FullName --clobber
           $release = gh release view ${{ inputs.tag }} --json assets | ConvertFrom-Json
-          $asset = $release.assets | Where-Object { $_.name -eq 'VinylFlow-windows-unsigned.zip' }
-          $asset | Select-Object name,size,updatedAt,url | Format-List
+          $release.assets | Select-Object name,size,updatedAt | Format-Table

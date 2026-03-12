@@ -1,12 +1,26 @@
 /**
  * VinylFlow Frontend Application
  * Alpine.js application for managing vinyl digitization workflow
+ * Windows desktop app — pywebview (WebView2)
  */
+
+// Global hook for auto-update banner (called from Python via evaluate_js)
+window._vinylflowShowUpdateBanner = function(version, url) {
+    const el = document.querySelector('[x-data]');
+    if (el && el.__x) {
+        el.__x.$data.updateAvailable = true;
+        el.__x.$data.updateVersion = version;
+        el.__x.$data.updateUrl = url;
+    }
+};
 
 function vinylApp() {
     return {
         // WebSocket connection
         ws: null,
+
+        // App readiness (loading screen)
+        appReady: false,
 
         // UI State
         dragging: false,
@@ -47,7 +61,7 @@ function vinylApp() {
             y: 0,
             trackNumber: null,
             isIgnored: false,
-            time: 0  // Position for split functionality
+            time: 0
         },
 
         // Discogs Search
@@ -62,6 +76,7 @@ function vinylApp() {
         processingProgress: 0,
         processingMessage: '',
         successMessage: '',
+        lastOutputPath: '',
         currentJobId: null,
         processPollTimer: null,
         lastProgressAt: null,
@@ -71,7 +86,7 @@ function vinylApp() {
         availableFormats: [],
 
         // Audio restoration
-        restorationLevel: 0,   // 0=disabled, 1=enabled
+        restorationLevel: 0,
 
         // Config
         config: {
@@ -83,7 +98,7 @@ function vinylApp() {
         },
 
         // Supported input file extensions
-        supportedExtensions: ['.wav', '.aiff', '.aif'],
+        supportedExtensions: ['.wav', '.aiff', '.aif', '.flac'],
 
         // Status
         discogsConfigured: true,
@@ -95,16 +110,16 @@ function vinylApp() {
         setupToken: '',
         setupUserAgent: 'VinylFlow/1.0',
 
+        // Auto-update
+        updateAvailable: false,
+        updateVersion: '',
+        updateUrl: '',
+
         /**
          * Initialize the application
          */
         async init() {
-            // Suppress the native WebKit/WKWebView context menu globally.
-            // WaveSurfer v7 renders inside a shadow DOM; by the time the
-            // 'contextmenu' event bubbles to our container listener WKWebView
-            // has already decided to show its native menu.  Calling
-            // preventDefault() in the capture phase (before any shadow-DOM
-            // handler fires) is the only reliable way to stop it.
+            // Suppress the native context menu globally (WebView2 interception)
             document.addEventListener('contextmenu', e => e.preventDefault(), true);
 
             await this.loadConfig();
@@ -117,6 +132,9 @@ function vinylApp() {
                     this.searchQuery = this.cleanFilename(file.filename);
                 }
             });
+
+            // Mark app as ready (hides loading screen)
+            this.appReady = true;
         },
 
         /**
@@ -204,12 +222,16 @@ function vinylApp() {
                         this.processingProgress = 1.0;
                         this.processingMessage = 'Complete!';
                         this.isProcessing = false;
-                        this.successMessage = `✅ ${data.tracks.length} tracks saved to your VinylFlow/output folder\n\nTracks: ${data.tracks.join(', ')}`;
+                        this.lastOutputPath = data.output_path || '';
+                        this.successMessage = `${data.tracks.length} tracks saved to your VinylFlow output folder\n\nTracks: ${data.tracks.join(', ')}`;
 
                         const file = this.uploadedFiles.find(f => f.id === data.file_id);
                         if (file) {
                             file.status = 'completed';
                         }
+
+                        // Send tray notification if window is hidden
+                        this.sendNotification('Processing Complete', `${data.tracks.length} tracks saved successfully.`);
                     }
                     break;
 
@@ -226,8 +248,130 @@ function vinylApp() {
                         }
                     }
                     break;
+
+                case 'files_added':
+                    // Files added via /api/upload-local (file associations / second instance)
+                    if (data.files && data.files.length > 0) {
+                        data.files.forEach(file => {
+                            if (!this.uploadedFiles.find(f => f.id === file.id)) {
+                                this.uploadedFiles.push({ ...file, status: 'uploaded' });
+                            }
+                        });
+                        if (!this.currentFile && data.files.length > 0) {
+                            this.selectFile(data.files[0].id);
+                        }
+                    }
+                    break;
             }
         },
+
+        // -----------------------------------------------------------------
+        // Desktop API helpers
+        // -----------------------------------------------------------------
+
+        /**
+         * Open a URL in the default browser via pywebview API
+         */
+        openExternalUrl(url) {
+            if (window.pywebview && window.pywebview.api && window.pywebview.api.open_url) {
+                window.pywebview.api.open_url(url);
+            } else {
+                window.open(url, '_blank');
+            }
+        },
+
+        /**
+         * Minimize to system tray
+         */
+        minimizeToTray() {
+            if (window.pywebview && window.pywebview.api && window.pywebview.api.minimize_to_tray) {
+                window.pywebview.api.minimize_to_tray();
+            }
+        },
+
+        /**
+         * Send a tray notification
+         */
+        sendNotification(title, message) {
+            if (window.pywebview && window.pywebview.api && window.pywebview.api.notify) {
+                window.pywebview.api.notify(title, message);
+            }
+        },
+
+        /**
+         * Open output folder in Explorer
+         */
+        openOutputFolder() {
+            if (this.lastOutputPath && window.pywebview && window.pywebview.api && window.pywebview.api.open_folder) {
+                window.pywebview.api.open_folder(this.lastOutputPath);
+            }
+        },
+
+        /**
+         * Download update — open in browser
+         */
+        downloadUpdate() {
+            if (this.updateUrl) {
+                this.openExternalUrl(this.updateUrl);
+            }
+        },
+
+        /**
+         * Select input files via native Windows file dialog
+         */
+        async selectInputFiles() {
+            if (window.pywebview && window.pywebview.api && window.pywebview.api.select_input_files) {
+                try {
+                    const paths = await window.pywebview.api.select_input_files();
+                    if (paths && paths.length > 0) {
+                        await this.uploadLocalFiles(paths);
+                        return;
+                    }
+                } catch (error) {
+                    console.error('Native file dialog failed:', error);
+                }
+            }
+            // Fallback to HTML file input
+            this.$refs.fileInput.click();
+        },
+
+        /**
+         * Upload local file paths (no HTTP upload — uses /api/upload-local)
+         */
+        async uploadLocalFiles(filePaths) {
+            try {
+                this.uploadProgress = 50;
+                const response = await fetch('/api/upload-local', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ file_paths: filePaths })
+                });
+
+                const data = await response.json();
+
+                data.files.forEach(file => {
+                    this.uploadedFiles.push({
+                        ...file,
+                        status: 'uploaded'
+                    });
+                });
+
+                if (!this.currentFile && data.files.length > 0) {
+                    this.selectFile(data.files[0].id);
+                }
+
+                this.uploadProgress = 100;
+                setTimeout(() => { this.uploadProgress = 0; }, 1000);
+            } catch (error) {
+                console.error('Local upload failed:', error);
+                alert('Failed to load files');
+                this.uploadProgress = 0;
+            }
+        },
+
+        // -----------------------------------------------------------------
+        // Config
+        // -----------------------------------------------------------------
 
         /**
          * Load configuration from API
@@ -251,7 +395,6 @@ function vinylApp() {
                 const data = await response.json();
                 this.discogsConfigured = data.discogs_configured;
 
-                // Show setup modal if not configured
                 if (!this.discogsConfigured) {
                     this.setupRequired = true;
                 }
@@ -283,12 +426,11 @@ function vinylApp() {
                     throw new Error(data.detail || 'Setup failed');
                 }
 
-                // Success!
                 this.discogsConfigured = true;
                 this.setupRequired = false;
                 this.setupToken = '';
 
-                alert(`✅ Successfully connected as ${data.username}!`);
+                alert(`Successfully connected as ${data.username}!`);
 
             } catch (error) {
                 this.setupError = error.message;
@@ -323,7 +465,6 @@ function vinylApp() {
         async chooseOutputFolder() {
             try {
                 if (!window.pywebview || !window.pywebview.api || !window.pywebview.api.select_output_folder) {
-                    alert('Folder picker is available in the desktop app only.');
                     return;
                 }
 
@@ -336,6 +477,10 @@ function vinylApp() {
                 alert('Failed to open folder picker');
             }
         },
+
+        // -----------------------------------------------------------------
+        // File upload & queue
+        // -----------------------------------------------------------------
 
         /**
          * Check if a file has a supported extension
@@ -366,7 +511,7 @@ function vinylApp() {
         },
 
         /**
-         * Upload files to server with progress tracking
+         * Upload files to server with progress tracking (HTTP upload fallback)
          */
         async uploadFiles(files) {
             if (files.length === 0) return;
@@ -377,14 +522,12 @@ function vinylApp() {
             return new Promise((resolve, reject) => {
                 const xhr = new XMLHttpRequest();
 
-                // Track upload progress
                 xhr.upload.addEventListener('progress', (e) => {
                     if (e.lengthComputable) {
                         this.uploadProgress = (e.loaded / e.total) * 100;
                     }
                 });
 
-                // Handle completion
                 xhr.addEventListener('load', () => {
                     this.uploadProgress = 100;
 
@@ -403,9 +546,6 @@ function vinylApp() {
                                 this.selectFile(data.files[0].id);
                             }
 
-                            alert(`Uploaded ${data.files.length} file(s)`);
-
-                            // Reset progress after a short delay
                             setTimeout(() => {
                                 this.uploadProgress = 0;
                             }, 1000);
@@ -425,7 +565,6 @@ function vinylApp() {
                     }
                 });
 
-                // Handle errors
                 xhr.addEventListener('error', () => {
                     console.error('Upload failed');
                     alert('Upload failed');
@@ -433,7 +572,6 @@ function vinylApp() {
                     reject(new Error('Upload failed'));
                 });
 
-                // Send the request
                 xhr.open('POST', '/api/upload');
                 xhr.send(formData);
             });
@@ -478,6 +616,10 @@ function vinylApp() {
                 console.error('Failed to remove file:', error);
             }
         },
+
+        // -----------------------------------------------------------------
+        // Analysis
+        // -----------------------------------------------------------------
 
         /**
          * Analyze file for silence detection
@@ -549,6 +691,10 @@ function vinylApp() {
             await this.analyzeFile();
         },
 
+        // -----------------------------------------------------------------
+        // Discogs
+        // -----------------------------------------------------------------
+
         /**
          * Search Discogs for releases
          */
@@ -574,7 +720,6 @@ function vinylApp() {
 
                 this.searchResults = data.results;
 
-                // Debug: Check URI field
                 console.log('Search results:', this.searchResults.map(r => ({
                     title: r.title,
                     uri: r.uri
@@ -602,7 +747,6 @@ function vinylApp() {
             const activeTrackCount = this.detectedTracks.filter(t => !t.ignored).length;
             const discogsTrackCount = release.tracks.length;
 
-            // Check for track count mismatch
             if (activeTrackCount !== discogsTrackCount) {
                 this.trackCountMismatch = true;
             } else {
@@ -617,15 +761,14 @@ function vinylApp() {
             const activeTrackCount = this.detectedTracks.filter(t => !t.ignored).length;
             const discogsTrackCount = this.selectedRelease.tracks.length;
 
-            // Check if Discogs has duration information
             const hasDiscogsDurations = this.selectedRelease.tracks.every(t => t.duration);
 
             if (!hasDiscogsDurations) {
-                alert(`❌ Duration-Based Splitting Unavailable\n\nDiscogs doesn't have duration information for this release.\n\nSuggestions:\n• Manually adjust track boundaries in the waveform\n• Search for a different release with duration data`);
+                alert('Duration-Based Splitting Unavailable\n\nDiscogs does not have duration information for this release.\n\nSuggestions:\n- Manually adjust track boundaries in the waveform\n- Search for a different release with duration data');
                 return;
             }
 
-            const message = `🎯 Try Duration-Based Splitting?\n\nSilence detection found ${activeTrackCount} tracks, but this release has ${discogsTrackCount} tracks.\n\nDuration-based splitting uses Discogs track lengths to divide the album instead of detecting silence.\n\nContinue?`;
+            const message = `Try Duration-Based Splitting?\n\nSilence detection found ${activeTrackCount} tracks, but this release has ${discogsTrackCount} tracks.\n\nDuration-based splitting uses Discogs track lengths to divide the album instead of detecting silence.\n\nContinue?`;
 
             if (confirm(message)) {
                 await this.analyzeFileDurationBased();
@@ -641,9 +784,7 @@ function vinylApp() {
             this.processingMessage = 'Creating duration-based splits...';
 
             try {
-                // Extract durations from Discogs tracks
                 const durations = this.selectedRelease.tracks.map(t => {
-                    // Parse duration string: "5:24" -> 324 seconds
                     if (!t.duration) return 0;
 
                     const parts = t.duration.split(':');
@@ -659,7 +800,6 @@ function vinylApp() {
                     throw new Error('Could not parse all track durations from Discogs');
                 }
 
-                // Call backend API
                 const response = await fetch('/api/analyze-duration-based', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -675,33 +815,34 @@ function vinylApp() {
                     throw new Error(data.detail || 'Duration-based analysis failed');
                 }
 
-                // Update detected tracks (same format as regular analysis)
                 this.detectedTracks = data.tracks.map(track => ({
                     ...track,
                     editing: false,
                     ignored: false,
-                    durationBased: true  // Flag for UI indication
+                    durationBased: true
                 }));
 
                 this.processingMessage = '';
 
-                // Update file status
                 const file = this.uploadedFiles.find(f => f.id === this.currentFileId);
                 if (file) {
                     file.status = 'analyzed (duration-based)';
                 }
 
-                // Reinitialize waveform
                 await this.initWaveform();
 
-                alert(`✅ Duration-Based Splitting Complete\n\nCreated ${this.detectedTracks.length} tracks based on Discogs durations.\n\nReview boundaries in the waveform and adjust if needed before processing.`);
+                alert(`Duration-Based Splitting Complete\n\nCreated ${this.detectedTracks.length} tracks based on Discogs durations.\n\nReview boundaries in the waveform and adjust if needed before processing.`);
 
             } catch (error) {
                 console.error('Duration-based analysis failed:', error);
-                alert('❌ Duration-based analysis failed: ' + error.message);
+                alert('Duration-based analysis failed: ' + error.message);
                 this.processingMessage = '';
             }
         },
+
+        // -----------------------------------------------------------------
+        // Track mapping
+        // -----------------------------------------------------------------
 
         /**
          * Reverse track mapping order
@@ -717,16 +858,14 @@ function vinylApp() {
             }
         },
 
-        /**
-         * Update custom mapping when user changes dropdown
-         */
         updateCustomMapping() {
             this.trackMappingReversed = false;
         },
 
-        /**
-         * Play preview of detected track (30 seconds)
-         */
+        // -----------------------------------------------------------------
+        // Preview playback
+        // -----------------------------------------------------------------
+
         playPreview(trackNumber) {
             if (!this.currentFileId) return;
 
@@ -748,9 +887,6 @@ function vinylApp() {
             this.currentPlayingTrack = trackNumber;
         },
 
-        /**
-         * Stop audio preview
-         */
         stopPreview() {
             const audioPlayer = this.$refs.audioPlayer;
             audioPlayer.pause();
@@ -758,9 +894,10 @@ function vinylApp() {
             this.currentPlayingTrack = null;
         },
 
-        /**
-         * Update track start time
-         */
+        // -----------------------------------------------------------------
+        // Track boundary editing
+        // -----------------------------------------------------------------
+
         updateTrackStart(idx, value) {
             const newStart = parseFloat(value);
             if (isNaN(newStart) || newStart < 0) return;
@@ -770,9 +907,6 @@ function vinylApp() {
             this.detectedTracks[idx].duration = end - newStart;
         },
 
-        /**
-         * Update track end time
-         */
         updateTrackEnd(idx, value) {
             const newEnd = parseFloat(value);
             if (isNaN(newEnd) || newEnd < 0) return;
@@ -786,9 +920,10 @@ function vinylApp() {
             }
         },
 
-        /**
-         * Initialize waveform visualization
-         */
+        // -----------------------------------------------------------------
+        // Waveform
+        // -----------------------------------------------------------------
+
         async initWaveform() {
             if (!this.currentFileId || this.waveform) return;
 
@@ -840,14 +975,11 @@ function vinylApp() {
 
                     const openWaveformContextMenu = (e) => {
                         const isSecondaryClick = e.type === 'contextmenu' || e.button === 2 || (e.button === 0 && e.ctrlKey);
-                        if (!isSecondaryClick) {
-                            return;
-                        }
+                        if (!isSecondaryClick) return;
 
                         e.preventDefault();
 
                         const waveformWrapper = container.querySelector('[part="wrapper"]') || container.querySelector('div');
-
                         if (!waveformWrapper) {
                             console.error('Could not find waveform wrapper');
                             return;
@@ -859,21 +991,12 @@ function vinylApp() {
                         const relativeX = Math.max(0, Math.min(1, x / totalWidth));
                         const time = relativeX * this.waveform.getDuration();
 
-                        console.log('Split calculation:', {
-                            clickX: e.clientX - rect.left,
-                            scrollLeft: waveformWrapper.scrollLeft,
-                            scrollWidth: totalWidth,
-                            relativeX,
-                            time
-                        });
-
                         this.contextMenu.x = e.clientX;
                         this.contextMenu.y = e.clientY;
                         this.contextMenu.time = time;
                         this.contextMenu.show = true;
                     };
 
-                    // Add right-click handler for manual splits
                     container.addEventListener('contextmenu', openWaveformContextMenu);
                     container.addEventListener('mousedown', openWaveformContextMenu);
 
@@ -887,19 +1010,14 @@ function vinylApp() {
                     this.updateTrackFromRegion(region);
                 });
 
-                // Add right-click handler for region actions
                 this.waveformRegions.on('region-created', (region) => {
                     const regionElement = region.element;
                     if (regionElement) {
                         const openRegionContextMenu = (e) => {
                             const isSecondaryClick = e.type === 'contextmenu' || e.button === 2 || (e.button === 0 && e.ctrlKey);
-                            if (!isSecondaryClick) {
-                                return;
-                            }
+                            if (!isSecondaryClick) return;
 
-                            if (e.target.classList.contains('wavesurfer-handle')) {
-                                return;
-                            }
+                            if (e.target.classList.contains('wavesurfer-handle')) return;
 
                             e.preventDefault();
                             e.stopPropagation();
@@ -942,9 +1060,6 @@ function vinylApp() {
             }
         },
 
-        /**
-         * Add draggable region markers for each track
-         */
         addTrackRegions() {
             if (!this.waveformRegions || !this.waveform) return;
 
@@ -987,15 +1102,15 @@ function vinylApp() {
             });
         },
 
-        /**
-         * Split track at context menu position
-         */
+        // -----------------------------------------------------------------
+        // Splitting / deleting tracks
+        // -----------------------------------------------------------------
+
         splitAtContextMenu() {
             this.contextMenu.show = false;
 
             const time = this.contextMenu.time;
 
-            // Find which track contains this time position (must be strictly inside)
             const trackIndex = this.detectedTracks.findIndex(t =>
                 time > t.start && time < t.end
             );
@@ -1007,7 +1122,6 @@ function vinylApp() {
 
             const trackToSplit = this.detectedTracks[trackIndex];
 
-            // Create two new tracks from the split
             const newTrack1 = {
                 number: trackToSplit.number,
                 start: trackToSplit.start,
@@ -1026,68 +1140,48 @@ function vinylApp() {
                 ignored: false
             };
 
-            // Renumber tracks after the split
             for (let i = trackIndex + 1; i < this.detectedTracks.length; i++) {
                 this.detectedTracks[i].number++;
             }
 
-            // Replace the split track with two new tracks
             this.detectedTracks.splice(trackIndex, 1, newTrack1, newTrack2);
-
-            // Refresh waveform regions
             this.addTrackRegions();
 
-            // Clear any selected release (track count changed)
             if (this.selectedRelease) {
                 this.selectedRelease = null;
                 this.trackCountMismatch = false;
             }
         },
 
-        /**
-         * Delete track from region context menu
-         */
         deleteTrackFromRegionMenu() {
             this.regionContextMenu.show = false;
-            
+
             const trackNumber = this.regionContextMenu.trackNumber;
             const trackIndex = this.detectedTracks.findIndex(t => t.number === trackNumber);
 
-            if (trackIndex === -1) {
-                return;
-            }
+            if (trackIndex === -1) return;
 
-            if (!confirm(`Delete Track ${trackNumber}? This cannot be undone.`)) {
-                return;
-            }
+            if (!confirm(`Delete Track ${trackNumber}? This cannot be undone.`)) return;
 
-            // Remove the track
             this.detectedTracks.splice(trackIndex, 1);
 
-            // Renumber subsequent tracks
             for (let i = trackIndex; i < this.detectedTracks.length; i++) {
                 this.detectedTracks[i].number = i + 1;
             }
 
-            // Refresh waveform regions
             this.addTrackRegions();
 
-            // Clear any selected release (track count changed)
             if (this.selectedRelease) {
                 this.selectedRelease = null;
                 this.trackCountMismatch = false;
             }
         },
 
-        /**
-         * Split track at region context menu position
-         */
         splitAtRegionContextMenu() {
             this.regionContextMenu.show = false;
 
             const time = this.regionContextMenu.time;
 
-            // Find which track contains this time position (must be strictly inside)
             const trackIndex = this.detectedTracks.findIndex(t =>
                 time > t.start && time < t.end
             );
@@ -1099,7 +1193,6 @@ function vinylApp() {
 
             const trackToSplit = this.detectedTracks[trackIndex];
 
-            // Create two new tracks from the split
             const newTrack1 = {
                 number: trackToSplit.number,
                 start: trackToSplit.start,
@@ -1118,66 +1211,44 @@ function vinylApp() {
                 ignored: false
             };
 
-            // Renumber tracks after the split
             for (let i = trackIndex + 1; i < this.detectedTracks.length; i++) {
                 this.detectedTracks[i].number++;
             }
 
-            // Replace the split track with two new tracks
             this.detectedTracks.splice(trackIndex, 1, newTrack1, newTrack2);
-
-            // Refresh waveform regions
             this.addTrackRegions();
 
-            // Clear any selected release (track count changed)
             if (this.selectedRelease) {
                 this.selectedRelease = null;
                 this.trackCountMismatch = false;
             }
         },
 
-        /**
-         * Delete a track and renumber remaining tracks
-         */
         deleteTrack(trackNumber) {
             const trackIndex = this.detectedTracks.findIndex(t => t.number === trackNumber);
 
-            if (trackIndex === -1) {
-                return;
-            }
+            if (trackIndex === -1) return;
 
-            if (!confirm(`Delete Track ${trackNumber}? This cannot be undone.`)) {
-                return;
-            }
+            if (!confirm(`Delete Track ${trackNumber}? This cannot be undone.`)) return;
 
-            // Remove the track
             this.detectedTracks.splice(trackIndex, 1);
 
-            // Renumber subsequent tracks
             for (let i = trackIndex; i < this.detectedTracks.length; i++) {
                 this.detectedTracks[i].number = i + 1;
             }
 
-            // Refresh waveform regions
             this.addTrackRegions();
 
-            // Clear any selected release (track count changed)
             if (this.selectedRelease) {
                 this.selectedRelease = null;
                 this.trackCountMismatch = false;
             }
         },
 
-        /**
-         * Get count of non-ignored tracks
-         */
         get activeTrackCount() {
             return this.detectedTracks.filter(t => !t.ignored).length;
         },
 
-        /**
-         * Toggle track ignored status and update region color
-         */
         toggleTrackIgnored(track) {
             track.ignored = !track.ignored;
 
@@ -1192,9 +1263,6 @@ function vinylApp() {
             }
         },
 
-        /**
-         * Get color for track by index
-         */
         getTrackColor(idx) {
             const colors = [
                 'rgba(59, 130, 246, 0.3)',
@@ -1207,9 +1275,6 @@ function vinylApp() {
             return colors[idx % colors.length];
         },
 
-        /**
-         * Update track data when region is dragged/resized
-         */
         updateTrackFromRegion(region) {
             const trackNumber = parseInt(region.id.replace('track-', ''));
             const track = this.detectedTracks.find(t => t.number === trackNumber);
@@ -1262,9 +1327,10 @@ function vinylApp() {
             }
         },
 
-        /**
-         * Process file with selected release
-         */
+        // -----------------------------------------------------------------
+        // Processing
+        // -----------------------------------------------------------------
+
         async processFile() {
             if (!this.currentFileId || !this.selectedRelease) return;
 
@@ -1345,9 +1411,7 @@ function vinylApp() {
 
                 try {
                     const response = await fetch(`/api/process/${jobId}`);
-                    if (!response.ok) {
-                        return;
-                    }
+                    if (!response.ok) return;
 
                     const job = await response.json();
 
@@ -1362,12 +1426,13 @@ function vinylApp() {
                         this.processingProgress = 1.0;
                         this.processingMessage = 'Complete!';
                         this.isProcessing = false;
+                        this.lastOutputPath = job.output_path || '';
 
                         const tracks = Array.isArray(job.tracks) ? job.tracks : [];
                         if (tracks.length > 0) {
-                            this.successMessage = `✅ ${tracks.length} tracks saved to your VinylFlow/output folder\n\nTracks: ${tracks.join(', ')}`;
+                            this.successMessage = `${tracks.length} tracks saved to your VinylFlow output folder\n\nTracks: ${tracks.join(', ')}`;
                         } else {
-                            this.successMessage = '✅ Processing complete. Files saved to your VinylFlow/output folder.';
+                            this.successMessage = 'Processing complete. Files saved to your VinylFlow output folder.';
                         }
 
                         const file = this.uploadedFiles.find(f => f.id === job.file_id);
@@ -1403,12 +1468,14 @@ function vinylApp() {
             this.currentJobId = null;
         },
 
-        /**
-         * Reset UI for next file
-         */
+        // -----------------------------------------------------------------
+        // Reset / helpers
+        // -----------------------------------------------------------------
+
         resetForNextFile() {
             this.stopProcessPolling();
             this.successMessage = '';
+            this.lastOutputPath = '';
             this.isProcessing = false;
             this.detectedTracks = [];
             this.searchResults = [];
@@ -1426,12 +1493,8 @@ function vinylApp() {
             }
         },
 
-        /**
-         * Clean filename for Discogs search
-         */
         cleanFilename(filename) {
-            // Remove all supported extensions
-            let name = filename.replace(/\.(wav|aiff|aif)$/i, '');
+            let name = filename.replace(/\.(wav|aiff|aif|flac)$/i, '');
             name = name.replace(/[-_]+/g, ' ');
             name = name.replace(/\s+/g, ' ').trim();
             return name;

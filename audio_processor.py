@@ -23,7 +23,7 @@ def _ffmpeg() -> str:
     return os.environ.get("VINYLFLOW_FFMPEG_PATH") or "ffmpeg"
 
 # Supported input formats
-SUPPORTED_INPUT_EXTENSIONS = {".wav", ".aiff", ".aif"}
+SUPPORTED_INPUT_EXTENSIONS = {".wav", ".aiff", ".aif", ".flac"}
 
 # Output format configurations: codec flags for FFmpeg + file extension
 OUTPUT_FORMATS = {

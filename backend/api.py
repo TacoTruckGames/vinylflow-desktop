@@ -21,7 +21,6 @@ import logging
 from fastapi import FastAPI, File, UploadFile, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -32,22 +31,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import Config
-from audio_processor import AudioProcessor, Track, SUPPORTED_INPUT_EXTENSIONS, OUTPUT_FORMATS
-from metadata_handler import MetadataHandler
+from audio_processor import AudioProcessor, Track, SUPPORTED_INPUT_EXTENSIONS, OUTPUT_FORMATS, _ffmpeg
 
 # Initialize FastAPI app
 app = FastAPI(title="VinylFlow API", version="1.0.0")
-
-# Enable CORS
-# Note: allow_origins=["*"] is fine for local/self-hosted use.
-# If exposing publicly, restrict this to your specific domain.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Global state management
 uploaded_files: Dict[str, dict] = {}
@@ -62,12 +49,11 @@ audio_processor = AudioProcessor(
     min_track_length=config.default_min_track_length,
     flac_compression=config.default_flac_compression,
 )
+
+from metadata_handler import MetadataHandler
 metadata_handler = MetadataHandler(config.discogs_token, config.discogs_user_agent)
 
 # Temp directory for uploads.
-# In desktop/bundled mode the launcher sets VINYLFLOW_UPLOAD_DIR to a
-# writable location inside the user's AppData folder.  Fall back to a path
-# relative to the source tree when running in development.
 _upload_dir_env = os.getenv("VINYLFLOW_UPLOAD_DIR")
 UPLOAD_DIR = Path(_upload_dir_env) if _upload_dir_env else Path(__file__).parent.parent / "temp_uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -200,6 +186,14 @@ class DiscogsSetupRequest(BaseModel):
     user_agent: Optional[str] = "VinylFlow/1.0"
 
 
+class LocalUploadRequest(BaseModel):
+    file_paths: List[str]
+
+
+class OpenFilesRequest(BaseModel):
+    file_paths: List[str]
+
+
 # WebSocket broadcast helper
 async def broadcast_message(message: dict):
     """Broadcast message to all connected WebSocket clients."""
@@ -272,7 +266,7 @@ async def preconvert_to_mp3(file_id: str, file_path: Path):
             await asyncio.to_thread(
                 subprocess.run,
                 [
-                    "ffmpeg",
+                    _ffmpeg(),
                     "-y",
                     "-i",
                     str(file_path),
@@ -292,11 +286,34 @@ async def preconvert_to_mp3(file_id: str, file_path: Path):
             print(f"MP3 conversion failed for {file_id}: {e}")
 
 
+def _register_uploaded_file(file_id: str, file_path: Path, original_filename: str) -> dict:
+    """Register a file in the uploaded_files dict and return its info."""
+    file_size = file_path.stat().st_size
+
+    try:
+        duration = audio_processor.get_audio_duration(file_path)
+        if duration is None:
+            duration = 0
+    except Exception:
+        duration = 0
+
+    info = {
+        "id": file_id,
+        "filename": original_filename,
+        "path": str(file_path),
+        "size": file_size,
+        "duration": duration,
+        "status": "uploaded",
+    }
+    uploaded_files[file_id] = info
+    return info
+
+
 @app.post("/api/upload")
 async def upload_files(files: List[UploadFile] = File(...)):
     """
     Upload audio file(s) for processing.
-    Supports WAV and AIFF formats.
+    Supports WAV, AIFF, and FLAC formats.
     Returns file IDs and metadata.
     """
     uploaded = []
@@ -318,35 +335,76 @@ async def upload_files(files: List[UploadFile] = File(...)):
             content = await file.read()
             buffer.write(content)
 
-        # Get file metadata
-        file_size = file_path.stat().st_size
-
-        # Get duration using audio processor
-        try:
-            duration = audio_processor.get_audio_duration(file_path)
-            if duration is None:
-                duration = 0
-        except Exception:
-            duration = 0
-
-        # Store file info
-        uploaded_files[file_id] = {
-            "id": file_id,
-            "filename": file.filename,
-            "path": str(file_path),
-            "size": file_size,
-            "duration": duration,
-            "status": "uploaded",
-        }
+        info = _register_uploaded_file(file_id, file_path, file.filename)
 
         # Start MP3 conversion in background (for fast waveform loading)
         asyncio.create_task(preconvert_to_mp3(file_id, file_path))
 
         uploaded.append(
-            {"id": file_id, "filename": file.filename, "size": file_size, "duration": duration}
+            {"id": file_id, "filename": file.filename, "size": info["size"], "duration": info["duration"]}
         )
 
     return {"files": uploaded}
+
+
+@app.post("/api/upload-local")
+async def upload_local_files(request: LocalUploadRequest):
+    """
+    Register local file paths for processing (no HTTP upload needed).
+    Files are referenced in-place via symlink or direct path.
+    Returns same response shape as /api/upload.
+    """
+    uploaded = []
+
+    for file_path_str in request.file_paths:
+        file_path = Path(file_path_str)
+
+        if not file_path.exists() or not file_path.is_file():
+            continue
+
+        file_ext = file_path.suffix.lower()
+        if file_ext not in SUPPORTED_INPUT_EXTENSIONS:
+            continue
+
+        file_id = str(uuid.uuid4())
+        session_dir = get_session_path(file_id)
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create a symlink or copy into the session directory
+        target_path = session_dir / f"source{file_ext}"
+        try:
+            os.symlink(str(file_path.resolve()), str(target_path))
+        except (OSError, NotImplementedError):
+            # Symlinks may require elevated privileges on Windows; fall back to copy
+            shutil.copy2(str(file_path), str(target_path))
+
+        info = _register_uploaded_file(file_id, target_path, file_path.name)
+
+        # Start MP3 conversion in background
+        asyncio.create_task(preconvert_to_mp3(file_id, target_path))
+
+        uploaded.append(
+            {"id": file_id, "filename": file_path.name, "size": info["size"], "duration": info["duration"]}
+        )
+
+    # Notify frontend via WebSocket
+    if uploaded:
+        await broadcast_message({
+            "type": "files_added",
+            "files": uploaded,
+        })
+
+    return {"files": uploaded}
+
+
+@app.post("/api/open-files")
+async def open_files(request: OpenFilesRequest):
+    """
+    Accept file paths from a second instance and register them.
+    Used for single-instance file forwarding and file associations.
+    """
+    result = await upload_local_files(LocalUploadRequest(file_paths=request.file_paths))
+    return result
 
 
 @app.post("/api/analyze")
@@ -420,7 +478,6 @@ async def analyze_duration_based(request: DurationBasedAnalyzeRequest):
         raise HTTPException(status_code=404, detail="Audio file not found")
 
     try:
-        # Use existing duration-based splitting method
         processor = AudioProcessor(
             silence_threshold=config.default_silence_threshold,
             min_silence_duration=config.default_min_silence_duration,
@@ -433,12 +490,10 @@ async def analyze_duration_based(request: DurationBasedAnalyzeRequest):
             verbose=True
         )
 
-        # Store tracks for this file
         file_info["detected_tracks"] = tracks
         file_info["detection_method"] = "duration_based"
         file_info["status"] = "analyzed"
 
-        # Broadcast via WebSocket
         await broadcast_message({
             "type": "analysis_complete",
             "file_id": request.file_id,
@@ -499,7 +554,7 @@ async def preview_track(
 
         subprocess.run(
             [
-                "ffmpeg",
+                _ffmpeg(),
                 "-y",
                 "-i",
                 str(file_path),
@@ -547,7 +602,7 @@ async def get_waveform_peaks(file_id: str):
 
     try:
         cmd = [
-            "ffmpeg",
+            _ffmpeg(),
             "-i",
             str(file_path),
             "-f",
@@ -612,6 +667,7 @@ async def get_audio_file(file_id: str):
         ".wav": "audio/wav",
         ".aiff": "audio/aiff",
         ".aif": "audio/aiff",
+        ".flac": "audio/flac",
     }
     media_type = media_types.get(ext, "audio/wav")
 
@@ -710,9 +766,7 @@ async def process_file_background(request: ProcessRequest, job_id: str):
             raise Exception("Failed to fetch Discogs release")
 
         # Build detected tracks from boundaries sent by frontend
-        # This handles manually split tracks correctly
         if request.track_boundaries:
-            # Create fresh Track objects from boundaries
             detected_tracks = []
             for boundary in request.track_boundaries:
                 detected_tracks.append(
@@ -723,12 +777,10 @@ async def process_file_background(request: ProcessRequest, job_id: str):
                     )
                 )
         else:
-            # Fall back to original detected tracks if no boundaries provided
             detected_tracks = copy.deepcopy(file_info.get("detected_tracks", []))
 
         # Apply vinyl numbers from track mapping
         for mapping in request.track_mapping:
-            # Find track by number (not by index, since numbers may not be sequential)
             track = next((t for t in detected_tracks if t.number == mapping.detected), None)
             if track:
                 track.vinyl_number = mapping.discogs
@@ -981,10 +1033,3 @@ async def setup_discogs_token(request: DiscogsSetupRequest):
 
 # Mount static files (must be last)
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
