@@ -7,7 +7,7 @@ Replaces WaveSurfer.js functionality.
 
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QUrl
 from PySide6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QCursor, QFont,
+    QPainter, QColor, QPen, QBrush, QCursor, QFont, QIcon, QPixmap,
 )
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGraphicsView, QGraphicsScene,
@@ -24,6 +24,36 @@ from ui.styles import (
 
 WAVEFORM_HEIGHT = 200
 HANDLE_WIDTH = 6
+
+
+def _make_zoom_icon(sign: str, size: int = 20) -> QIcon:
+    """Draw a magnifying glass icon with + or - sign."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(QColor(0, 0, 0, 0))
+
+    p = QPainter(pixmap)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    # Glass circle
+    pen = QPen(QColor(TEXT_SECONDARY))
+    pen.setWidth(2)
+    p.setPen(pen)
+    p.drawEllipse(2, 2, 12, 12)
+
+    # Handle
+    p.drawLine(12, 12, 17, 17)
+
+    # + or - sign inside circle
+    pen.setWidth(2)
+    p.setPen(pen)
+    if sign == "+":
+        p.drawLine(5, 8, 11, 8)
+        p.drawLine(8, 5, 8, 11)
+    else:
+        p.drawLine(5, 8, 11, 8)
+
+    p.end()
+    return QIcon(pixmap)
 
 
 class WaveformBarsItem(QGraphicsItem):
@@ -212,7 +242,8 @@ class WaveformWidget(QWidget):
         controls = QHBoxLayout()
         controls.setSpacing(8)
 
-        self.zoom_out_btn = QPushButton("-")
+        self.zoom_out_btn = QPushButton()
+        self.zoom_out_btn.setIcon(_make_zoom_icon("-"))
         self.zoom_out_btn.setFixedSize(28, 28)
         self.zoom_out_btn.setToolTip("Zoom out")
         self.zoom_out_btn.clicked.connect(self._zoom_out)
@@ -224,7 +255,8 @@ class WaveformWidget(QWidget):
         self.zoom_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
         controls.addWidget(self.zoom_label)
 
-        self.zoom_in_btn = QPushButton("+")
+        self.zoom_in_btn = QPushButton()
+        self.zoom_in_btn.setIcon(_make_zoom_icon("+"))
         self.zoom_in_btn.setFixedSize(28, 28)
         self.zoom_in_btn.setToolTip("Zoom in")
         self.zoom_in_btn.clicked.connect(self._zoom_in)
