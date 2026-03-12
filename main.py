@@ -93,6 +93,27 @@ def _bundled_ffmpeg_path() -> Path | None:
     return None
 
 
+def _find_system_ffmpeg() -> Path | None:
+    """Find ffmpeg.exe on PATH or in common Windows install locations."""
+    import shutil
+    which = shutil.which("ffmpeg")
+    if which:
+        return Path(which)
+
+    # Common install paths (winget, chocolatey, manual)
+    candidates = [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages",
+        Path("C:/ProgramData/chocolatey/bin"),
+        Path("C:/ffmpeg/bin"),
+    ]
+    for base in candidates:
+        if not base.exists():
+            continue
+        for match in base.rglob("ffmpeg.exe"):
+            return match
+    return None
+
+
 def configure_desktop_environment():
     app_data_dir = _windows_app_support_dir()
 
@@ -109,6 +130,9 @@ def configure_desktop_environment():
     os.environ.setdefault("DEFAULT_OUTPUT_DIR", str(output_dir))
 
     bundled_ffmpeg = _bundled_ffmpeg_path()
+    if not bundled_ffmpeg:
+        # Dev mode: find ffmpeg on PATH or in common install locations
+        bundled_ffmpeg = _find_system_ffmpeg()
     if bundled_ffmpeg:
         bundled_str = str(bundled_ffmpeg)
         os.environ.setdefault("VINYLFLOW_FFMPEG_PATH", bundled_str)
