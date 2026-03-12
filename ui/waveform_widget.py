@@ -249,7 +249,8 @@ class PlaybackCursor(QGraphicsLineItem):
     def __init__(self, height: float):
         super().__init__(0, 0, 0, height)
         pen = QPen(QColor(AMBER))
-        pen.setWidth(2)
+        pen.setWidthF(2.0)
+        pen.setCosmetic(True)  # constant screen width regardless of zoom
         self.setPen(pen)
         self.setZValue(50)
         self.hide()
@@ -604,6 +605,14 @@ class WaveformWidget(QWidget):
         level = int(self._current_zoom) if self._current_zoom >= 1 else self._current_zoom
         self.zoom_label.setText(f"{level}x")
 
+        # Center the view on the playback cursor position
+        if self._cursor and self._cursor.isVisible():
+            self.view.centerOn(self._cursor.pos().x(), WAVEFORM_HEIGHT / 2)
+        elif self._player and self._peaks and self._duration > 0:
+            position_sec = self._player.position() / 1000.0
+            px_per_sec = len(self._peaks) / self._duration
+            self.view.centerOn(position_sec * px_per_sec, WAVEFORM_HEIGHT / 2)
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Space:
             self._toggle_play_pause()
@@ -624,15 +633,23 @@ class WaveformWidget(QWidget):
 
     def eventFilter(self, obj, event):
         from PySide6.QtCore import QEvent
-        if obj is self.view.viewport() and event.type() == QEvent.Type.MouseButtonPress:
-            if event.button() == Qt.MouseButton.LeftButton:
-                # Check if the click is on a region handle — if so, let it through
-                scene_pos = self.view.mapToScene(event.pos())
-                item = self.scene.itemAt(scene_pos, self.view.transform())
-                if not isinstance(item, RegionHandle):
-                    self._seek_to_scene_pos(scene_pos)
-                    self.setFocus()
-                    return True
+        if obj is self.view.viewport():
+            if event.type() == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    # Check if the click is on a region handle — if so, let it through
+                    scene_pos = self.view.mapToScene(event.pos())
+                    item = self.scene.itemAt(scene_pos, self.view.transform())
+                    if not isinstance(item, RegionHandle):
+                        self._seek_to_scene_pos(scene_pos)
+                        self.setFocus()
+                        return True
+            elif event.type() == QEvent.Type.Wheel:
+                delta = event.angleDelta().y()
+                if delta > 0:
+                    self._zoom_in()
+                elif delta < 0:
+                    self._zoom_out()
+                return True
         return super().eventFilter(obj, event)
 
     def _seek_to_scene_pos(self, scene_pos):
@@ -698,8 +715,16 @@ class WaveformWidget(QWidget):
         self._player.setAudioOutput(self._audio_output)
         self._player.playbackStateChanged.connect(self._on_playback_state_changed)
 
+    def _first_region_start_sec(self) -> float:
+        """Return the start time of the first track region, or 0.0 if none."""
+        if not self._regions or not self._peaks or self._duration <= 0:
+            return 0.0
+        px_per_sec = len(self._peaks) / self._duration
+        starts = [r.start_x() / px_per_sec for r in self._regions]
+        return max(0.0, min(starts))
+
     def _on_play(self):
-        """Play the full source audio file."""
+        """Play the source audio from the first analyzed region."""
         if not self._source_path or not self._peaks:
             return
 
@@ -708,11 +733,8 @@ class WaveformWidget(QWidget):
             self._set_playback_buttons("playing")
             return
 
-        self._stop_playback()
-        self._init_player()
-        self._player.setSource(QUrl.fromLocalFile(self._source_path))
-        self._player.play()
-        self._set_playback_buttons("playing")
+        start_sec = self._first_region_start_sec()
+        self.play_from_time(start_sec)
 
     def _on_pause(self):
         if self._player and self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -757,7 +779,6 @@ class WaveformWidget(QWidget):
         cursor_x = position_sec * px_per_sec
         if self._cursor:
             self._cursor.setPos(cursor_x, 0)
-            self._cursor.show()
         # Update time display
         mins = int(position_sec // 60)
         secs = int(position_sec % 60)
