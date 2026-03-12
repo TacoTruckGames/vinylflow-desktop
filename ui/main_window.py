@@ -272,6 +272,8 @@ class MainWindow(QMainWindow):
         cached = getattr(self, "_analyze_results", {}).get(file_id)
         if cached:
             self._detected_tracks = cached
+            self.tracks_panel.set_tracks(cached)
+            self.mapping_panel.set_detected_tracks(cached)
         else:
             self._detected_tracks = []
 
